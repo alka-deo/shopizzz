@@ -195,7 +195,7 @@ def association_rules_tab(df):
     st.header("🔗 Association Rule Mining")
     st.markdown("Discover patterns in customer shopping behavior")
     
-    # Error Check for 'cart_items' column
+    # FIX: Added Check for 'cart_items' column to prevent KeyError
     if 'cart_items' not in df.columns:
         st.error("⚠️ The DataFrame is missing the required column **'cart_items'** for Association Rule Mining. Please use the Sample Data or upload a file with transaction items in a column named 'cart_items'.")
         return
@@ -393,7 +393,7 @@ def classification_tab(df):
     st.header("🎯 Classification Analysis")
     st.markdown("Predict customer behavior and segment classification")
     
-    # Check for target columns
+    # FIX: Check for target columns
     required_cols = ['will_subscribe', 'willingness_to_pay_class']
     if not all(col in df.columns for col in required_cols):
         st.error("⚠️ The DataFrame is missing required target columns for Classification ('will_subscribe' or 'willingness_to_pay_class'). Please use the Sample Data or upload a file with these columns.")
@@ -922,7 +922,7 @@ def regression_tab(df):
     st.header("📈 Regression Analysis")
     st.markdown("Predict customer willingness to pay (numeric)")
     
-    # Check for target column
+    # FIX: Check for target column
     if 'willingness_to_pay_numeric' not in df.columns:
         st.error("⚠️ The DataFrame is missing the required target column **'willingness_to_pay_numeric'** for Regression Analysis. Please use the Sample Data or upload a file with this column.")
         return
@@ -1180,7 +1180,7 @@ def dynamic_pricing_tab(df):
     st.header("💰 Dynamic Pricing Engine")
     st.markdown("Get personalized price recommendations based on customer profile")
     
-    # Check for target column
+    # FIX: Check for target column
     required_cols = ['willingness_to_pay_numeric']
     if not all(col in df.columns for col in required_cols):
         st.error("⚠️ The DataFrame is missing required columns for Dynamic Pricing. Please use the Sample Data or upload a file with the 'willingness_to_pay_numeric' column.")
@@ -1197,11 +1197,11 @@ def dynamic_pricing_tab(df):
             y = df_processed['willingness_to_pay_numeric']
             
             scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
+            X = scaler.fit_transform(X) # X_scaled in this local scope
             
             # Train Random Forest (best performing model typically)
             model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X_scaled, y)
+            model.fit(X, y)
         except Exception as e:
             st.error(f"Failed to train the pricing model. Ensure data integrity. Error: {e}")
             return
@@ -1212,14 +1212,14 @@ def dynamic_pricing_tab(df):
     st.subheader("👤 Customer Profile Input")
     
     # Get available categories from the original data columns for selectboxes
-    age_groups = df['age_group'].unique()
-    genders = df['gender'].unique()
-    locations = df['location'].unique()
-    income_levels = df['income'].unique()
-    monthly_spendings = df['monthly_spending'].unique()
-    shopping_styles = df['shopping_style'].unique()
-    sustainability_levels = df['sustainability'].unique()
-    artisan_supports = df['artisan_support'].unique()
+    age_groups = df['age_group'].unique() if 'age_group' in df.columns else []
+    genders = df['gender'].unique() if 'gender' in df.columns else []
+    locations = df['location'].unique() if 'location' in df.columns else []
+    income_levels = df['income'].unique() if 'income' in df.columns else []
+    monthly_spendings = df['monthly_spending'].unique() if 'monthly_spending' in df.columns else []
+    shopping_styles = df['shopping_style'].unique() if 'shopping_style' in df.columns else []
+    sustainability_levels = df['sustainability'].unique() if 'sustainability' in df.columns else []
+    artisan_supports = df['artisan_support'].unique() if 'artisan_support' in df.columns else []
     
     # Ensure all are sorted and in list form for clean display
     for var in [age_groups, genders, locations, income_levels, monthly_spendings, shopping_styles, sustainability_levels, artisan_supports]:
@@ -1231,18 +1231,18 @@ def dynamic_pricing_tab(df):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        age_group = st.selectbox("Age Group", age_groups)
-        gender = st.selectbox("Gender", genders)
-        location = st.selectbox("Location", locations)
+        age_group = st.selectbox("Age Group", age_groups) if age_groups.any() else '18-24'
+        gender = st.selectbox("Gender", genders) if genders.any() else 'Male'
+        location = st.selectbox("Location", locations) if locations.any() else 'Metro'
     
     with col2:
-        income = st.selectbox("Income Level", income_levels)
-        monthly_spending = st.selectbox("Current Monthly Spending", monthly_spendings)
-        shopping_style = st.selectbox("Shopping Style", shopping_styles)
+        income = st.selectbox("Income Level", income_levels) if income_levels.any() else '<25K'
+        monthly_spending = st.selectbox("Current Monthly Spending", monthly_spendings) if monthly_spendings.any() else '<1K'
+        shopping_style = st.selectbox("Shopping Style", shopping_styles) if shopping_styles.any() else 'Budget'
     
     with col3:
-        sustainability = st.selectbox("Sustainability Consciousness", sustainability_levels)
-        artisan_support = st.selectbox("Artisan Support Interest", artisan_supports)
+        sustainability = st.selectbox("Sustainability Consciousness", sustainability_levels) if sustainability_levels.any() else 'Low'
+        artisan_support = st.selectbox("Artisan Support Interest", artisan_supports) if artisan_supports.any() else 'Low'
         categories_interested = st.slider("Number of Categories Interested", 1, 6, 3)
         features_wanted = st.slider("Number of Features Wanted", 1, 8, 4)
     
@@ -1278,9 +1278,6 @@ def dynamic_pricing_tab(df):
         })
         
         # Encode input
-        # Note: This relies on the global `label_encoders` from the initial model training run.
-        # This is a safe assumption for this synthetic data app structure.
-        
         try:
             for col in label_encoders.keys():
                 if col in input_data.columns:
@@ -1319,12 +1316,6 @@ def dynamic_pricing_tab(df):
             return
 
         # Simplified WTP to Max Price Mapping (Based on prediction scale)
-        # The WTP numeric scale is approx 0 to 7 (synthetic data generation)
-        # We need a business rule to link this score to a max price.
-        # For demonstration, we'll use a linear scale and clamp.
-        
-        # WTP score (0-7) to Max Price (e.g., 2000 to 18000)
-        # Max WTP formula: Max_Price = Min_Base + (WTP_Score / Max_Score) * Price_Range
         MIN_WTP_PRICE = 1500
         MAX_WTP_PRICE = 20000
         MAX_WTP_SCORE = 7 
@@ -1358,7 +1349,6 @@ def dynamic_pricing_tab(df):
         final_price = optimal_price * (1 - loyalty_discount / 100)
         
         # FINAL CONSTRAINT: Ensure final price is BELOW the maximum predicted WTP
-        # Use the mid-point of the confidence interval as a reference floor
         max_acceptable_price = predicted_max_price
         
         # If the calculated final price is much higher than WTP, reduce it.
