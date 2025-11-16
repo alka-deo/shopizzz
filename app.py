@@ -680,6 +680,12 @@ def clustering_tab(df):
     with col1:
         algorithm = st.selectbox("Clustering Algorithm", 
                                 ['K-Means', 'Hierarchical', 'DBSCAN'])
+    
+    # Initialize default values outside the button block for robustness
+    n_clusters = 4 
+    eps = 0.5      
+    min_samples = 5 
+    
     with col2:
         if algorithm != 'DBSCAN':
             n_clusters = st.slider("Number of Clusters", 2, 10, 4)
@@ -697,7 +703,7 @@ def clustering_tab(df):
             # Filter df_processed to ensure all columns exist
             feature_cols = [col for col in feature_cols if col in df_processed.columns]
             
-            # FIX: Validation to prevent InvalidParameterError
+            # Validation to prevent InvalidParameterError
             if not feature_cols:
                 st.error("🚨 Selected features could not be found or encoded in the current DataFrame. Please ensure the data includes the selected columns or use the Sample Data.")
                 return
@@ -707,7 +713,7 @@ def clustering_tab(df):
             if X.empty or X.shape[0] < 2:
                 st.error("🚨 The resulting feature matrix is empty or contains too few samples to perform clustering. Please check your selected features or the loaded data.")
                 return
-            # End Fix
+            # End Validation
             
             # Scale features
             scaler = StandardScaler()
@@ -715,18 +721,15 @@ def clustering_tab(df):
             
             # Perform clustering
             labels = []
-            n_clusters = 0
             
             if algorithm == 'K-Means':
-                model = KMeans(n_clusters=n_clusters if 'n_clusters' in locals() else 4, 
-                               random_state=42, n_init=10)
+                model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
                 labels = model.fit_predict(X_scaled)
             elif algorithm == 'Hierarchical':
-                model = AgglomerativeClustering(n_clusters=n_clusters if 'n_clusters' in locals() else 4)
+                model = AgglomerativeClustering(n_clusters=n_clusters)
                 labels = model.fit_predict(X_scaled)
             else:  # DBSCAN
-                model = DBSCAN(eps=eps if 'eps' in locals() else 0.5, 
-                              min_samples=min_samples if 'min_samples' in locals() else 5)
+                model = DBSCAN(eps=eps, min_samples=min_samples)
                 labels = model.fit_predict(X_scaled)
             
             # Determine actual number of clusters
@@ -818,8 +821,8 @@ def clustering_tab(df):
                         
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(x=list(K_range), y=inertias, mode='lines+markers'))
-                        fig.add_vline(x=n_clusters if 'n_clusters' in locals() else 4, line_dash="dash", line_color="red",
-                                    annotation_text=f"Selected: {n_clusters if 'n_clusters' in locals() else 4}")
+                        fig.add_vline(x=n_clusters, line_dash="dash", line_color="red",
+                                    annotation_text=f"Selected: {n_clusters}")
                         fig.update_layout(
                             title='Elbow Method',
                             xaxis_title='Number of Clusters (K)',
@@ -852,8 +855,8 @@ def clustering_tab(df):
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=list(K_range), y=silhouette_scores, 
                                            mode='lines+markers'))
-                    fig.add_vline(x=n_clusters if 'n_clusters' in locals() else 4, line_dash="dash", line_color="red",
-                                annotation_text=f"Selected: {n_clusters if 'n_clusters' in locals() else 4}")
+                    fig.add_vline(x=n_clusters, line_dash="dash", line_color="red",
+                                annotation_text=f"Selected: {n_clusters}")
                     fig.update_layout(
                         title='Silhouette Score by Number of Clusters',
                         xaxis_title='Number of Clusters (K)',
@@ -1054,7 +1057,7 @@ def regression_tab(df):
             }).sort_values('Test R²', ascending=False)
             
             st.dataframe(
-                metrics_df.style.background_gradient(cmap='RdYlGn', subset=['Test R²', 'Adjusted R²'])
+                metrics_df.style.background_gradient(cmap='RdYlGn', subset=['Test R%', 'Adjusted R²'])
                                 .background_gradient(cmap='RdYlGn_r', subset=['RMSE', 'MAE'], axis=0, vmin=metrics_df[['RMSE', 'MAE']].min().min(), vmax=metrics_df[['RMSE', 'MAE']].max().max()),
                 use_container_width=True
             )
@@ -1576,18 +1579,22 @@ def main():
         if data_source == "Use Sample Data":
             n_samples = st.slider("Number of samples", 100, 2000, 1000, 100)
             if st.button("Generate Sample Data", key="gen_data"):
+                # Clear cache and generate new data to ensure clean state
+                generate_synthetic_data.clear()
                 df = generate_synthetic_data(n_samples)
                 st.session_state['df'] = df
-                st.success(f"✅ Generated {len(df)} samples")
+                st.success(f"✅ Generated {len(df)} samples. Please proceed to the main tabs.")
                 data_loaded = True
+                st.rerun() # Force a clean rerun after data generation
         
         elif data_source == "Upload CSV":
             uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
             if uploaded_file is not None:
                 df = pd.read_csv(uploaded_file)
                 st.session_state['df'] = df
-                st.success(f"✅ Loaded {len(df)} rows")
+                st.success(f"✅ Loaded {len(df)} rows. Please verify all required columns are present.")
                 data_loaded = True
+                st.rerun() # Force a clean rerun after data loading
         
         else:  # GitHub
             github_url = st.text_input(
@@ -1598,8 +1605,9 @@ def main():
                 df = load_data_from_github(github_url)
                 if df is not None:
                     st.session_state['df'] = df
-                    st.success(f"✅ Loaded {len(df)} rows from GitHub")
+                    st.success(f"✅ Loaded {len(df)} rows from GitHub.")
                     data_loaded = True
+                    st.rerun() # Force a clean rerun after data loading
         
         # Data summary
         df_current = st.session_state['df']
@@ -1629,7 +1637,7 @@ def main():
     df = st.session_state['df']
     
     if df is None:
-        st.warning("⚠️ Please load data from the sidebar to begin analysis (using **'Generate Sample Data'** is recommended to ensure all required columns are present).")
+        st.warning("⚠️ Please load data from the sidebar to begin analysis (using **'Generate Sample Data'** is the safest option).")
         
         # Show welcome screen features
         col1, col2, col3 = st.columns(3)
