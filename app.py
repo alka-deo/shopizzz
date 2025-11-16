@@ -195,7 +195,7 @@ def association_rules_tab(df):
     st.header("🔗 Association Rule Mining")
     st.markdown("Discover patterns in customer shopping behavior")
     
-    # FIX: Added Check for 'cart_items' column to prevent KeyError
+    # Validation Check
     if 'cart_items' not in df.columns:
         st.error("⚠️ The DataFrame is missing the required column **'cart_items'** for Association Rule Mining. Please use the Sample Data or upload a file with transaction items in a column named 'cart_items'.")
         return
@@ -393,7 +393,7 @@ def classification_tab(df):
     st.header("🎯 Classification Analysis")
     st.markdown("Predict customer behavior and segment classification")
     
-    # FIX: Check for target columns
+    # Validation Check
     required_cols = ['will_subscribe', 'willingness_to_pay_class']
     if not all(col in df.columns for col in required_cols):
         st.error("⚠️ The DataFrame is missing required target columns for Classification ('will_subscribe' or 'willingness_to_pay_class'). Please use the Sample Data or upload a file with these columns.")
@@ -440,6 +440,11 @@ def classification_tab(df):
             X = df_processed[feature_cols]
             y = df_processed[target_col]
             
+            # Check for empty feature set before split/scaling
+            if X.empty or X.shape[0] < 2:
+                st.error("🚨 The feature matrix is empty or too small. Check if the original demographic columns were present in the loaded data.")
+                return
+
             # Encode target if multi-class
             if target_type.startswith("Multi"):
                 le_target = LabelEncoder()
@@ -692,11 +697,17 @@ def clustering_tab(df):
             # Filter df_processed to ensure all columns exist
             feature_cols = [col for col in feature_cols if col in df_processed.columns]
             
+            # FIX: Validation to prevent InvalidParameterError
             if not feature_cols:
-                st.error("Selected features could not be found or encoded.")
+                st.error("🚨 Selected features could not be found or encoded in the current DataFrame. Please ensure the data includes the selected columns or use the Sample Data.")
                 return
 
             X = df_processed[feature_cols]
+
+            if X.empty or X.shape[0] < 2:
+                st.error("🚨 The resulting feature matrix is empty or contains too few samples to perform clustering. Please check your selected features or the loaded data.")
+                return
+            # End Fix
             
             # Scale features
             scaler = StandardScaler()
@@ -922,7 +933,7 @@ def regression_tab(df):
     st.header("📈 Regression Analysis")
     st.markdown("Predict customer willingness to pay (numeric)")
     
-    # FIX: Check for target column
+    # Validation Check
     if 'willingness_to_pay_numeric' not in df.columns:
         st.error("⚠️ The DataFrame is missing the required target column **'willingness_to_pay_numeric'** for Regression Analysis. Please use the Sample Data or upload a file with this column.")
         return
@@ -955,6 +966,11 @@ def regression_tab(df):
             feature_cols = get_feature_columns(df_processed)
             X = df_processed[feature_cols]
             y = df_processed['willingness_to_pay_numeric']
+
+            # Check for empty feature set before split/scaling
+            if X.empty or X.shape[0] < 2:
+                st.error("🚨 The feature matrix is empty or too small. Check if the original demographic columns were present in the loaded data.")
+                return
             
             # Train-test split
             X_train, X_test, y_train, y_test = train_test_split(
@@ -1180,7 +1196,7 @@ def dynamic_pricing_tab(df):
     st.header("💰 Dynamic Pricing Engine")
     st.markdown("Get personalized price recommendations based on customer profile")
     
-    # FIX: Check for target column
+    # Validation Check
     required_cols = ['willingness_to_pay_numeric']
     if not all(col in df.columns for col in required_cols):
         st.error("⚠️ The DataFrame is missing required columns for Dynamic Pricing. Please use the Sample Data or upload a file with the 'willingness_to_pay_numeric' column.")
@@ -1196,6 +1212,10 @@ def dynamic_pricing_tab(df):
             X = df_processed[feature_cols]
             y = df_processed['willingness_to_pay_numeric']
             
+            if X.empty or X.shape[0] < 2:
+                st.error("🚨 Cannot train pricing model: Feature matrix is empty or too small.")
+                return
+
             scaler = StandardScaler()
             X = scaler.fit_transform(X) # X_scaled in this local scope
             
@@ -1230,6 +1250,7 @@ def dynamic_pricing_tab(df):
 
     col1, col2, col3 = st.columns(3)
     
+    # Use default values based on synthetic data if columns aren't found
     with col1:
         age_group = st.selectbox("Age Group", age_groups) if age_groups.any() else '18-24'
         gender = st.selectbox("Gender", genders) if genders.any() else 'Male'
@@ -1608,7 +1629,7 @@ def main():
     df = st.session_state['df']
     
     if df is None:
-        st.warning("⚠️ Please load data from the sidebar to begin analysis (using 'Generate Sample Data' is recommended to ensure all required columns are present).")
+        st.warning("⚠️ Please load data from the sidebar to begin analysis (using **'Generate Sample Data'** is recommended to ensure all required columns are present).")
         
         # Show welcome screen features
         col1, col2, col3 = st.columns(3)
