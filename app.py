@@ -1,6 +1,7 @@
 """
 Shopizz.com Analytics Dashboard
 A comprehensive ML analytics platform for customer behavior analysis
+(Refactored to a multi-page app structure)
 """
 
 import streamlit as st
@@ -13,6 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO
 import warnings
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # ML Libraries
@@ -32,9 +34,9 @@ from sklearn.metrics import (
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 import networkx as nx
-from scipy import stats # Import required for Q-Q plot in regression (needed for original code functionality)
+from scipy import stats
 
-# Attempt to import XGBoost, handle gracefully if not installed
+# Attempt to import XGBoost
 try:
     from xgboost import XGBClassifier, XGBRegressor
 except ImportError:
@@ -48,34 +50,51 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS (from your friend's code)
 st.markdown("""
-    <style>
-    .main {background-color: #f5f5f5;}
-    .stTabs [data-baseweb="tab-list"] {gap: 8px;}
-    .stTabs [data-baseweb="tab"] {
-        background-color: #ffffff;
-        border-radius: 5px;
-        padding: 10px 20px;
-        border: 2px solid #e0e0e0;
+<style>
+    .main-header {
+        font-size: 3rem;
+        color: #1f77b4;
+        text-align: center;
+        font-weight: bold;
+        padding: 1rem;
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
     }
-    .stTabs [aria-selected="true"] {
-        background-color: #4CAF50;
-        color: white;
-        border-color: #4CAF50;
+    .sub-header {
+        font-size: 1.5rem;
+        color: #2c3e50;
+        font-weight: bold;
+        margin-top: 1rem;
     }
     .metric-card {
-        background-color: white;
-        padding: 20px;
+        background-color: #f8f9fa;
+        padding: 1rem;
         border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 5px solid #667eea;
+        margin: 0.5rem 0;
     }
-    </style>
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 3rem;
+        padding: 0 2rem;
+        background-color: #f0f2f6;
+        border-radius: 10px 10px 0 0;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #667eea;
+        color: white;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-# =============================================================================
+# ============================================================================
 # DATA GENERATION & LOADING FUNCTIONS
-# =============================================================================
+# ============================================================================
 
 @st.cache_data
 def generate_synthetic_data(n_samples=1000):
@@ -99,7 +118,7 @@ def generate_synthetic_data(n_samples=1000):
         'sustainability': np.random.choice(['Low', 'Medium', 'High', 'Very High'], n_samples,
                                           p=[0.15, 0.35, 0.35, 0.15]),
         'artisan_support': np.random.choice(['Low', 'Medium', 'High', 'Very High'], n_samples,
-                                           p=[0.2, 0.3, 0.35, 0.15]),
+                                          p=[0.2, 0.3, 0.35, 0.15]),
         'shopping_style': np.random.choice(['Budget', 'Balanced', 'Premium', 'Luxury'], n_samples,
                                           p=[0.25, 0.4, 0.25, 0.1]),
         'categories_interested': np.random.randint(1, 6, n_samples),
@@ -107,7 +126,6 @@ def generate_synthetic_data(n_samples=1000):
     }
     
     # Generate willingness to pay (5 classes for classification)
-    # Scale based on monthly spending index
     spending_map = ['<1K', '1-3K', '3-5K', '5-10K', '>10K']
     base_wtp = (
         pd.Series(data['monthly_spending']).apply(lambda x: spending_map.index(x)) * 0.3 +
@@ -140,14 +158,22 @@ def generate_synthetic_data(n_samples=1000):
     return df
 
 @st.cache_data
+def load_data(uploaded_file):
+    """Load data from uploaded file"""
+    try:
+        df = pd.read_csv(uploaded_file)
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+@st.cache_data
 def load_data_from_github(url):
     """Load data from GitHub raw URL"""
     try:
         df = pd.read_csv(url)
-        return df
+        return df, None
     except Exception as e:
-        st.error(f"Error loading data from GitHub: {e}")
-        return None
+        return None, str(e)
 
 def convert_df_to_csv(df):
     """Convert dataframe to CSV for download"""
@@ -160,18 +186,18 @@ def convert_df_to_excel(df):
         df.to_excel(writer, index=False, sheet_name='Data')
     return output.getvalue()
 
-# =============================================================================
-# PREPROCESSING FUNCTIONS
-# =============================================================================
+# ============================================================================
+# DATA PROCESSING FUNCTIONS
+# ============================================================================
 
-def preprocess_data(df):
-    """Preprocess data for ML models"""
+def process_data(df):
+    """Preprocess data for ML models and store encoders"""
     df_processed = df.copy()
     
     # Encode categorical variables
     label_encoders = {}
     categorical_cols = ['age_group', 'gender', 'location', 'income', 'monthly_spending',
-                       'sustainability', 'artisan_support', 'shopping_style']
+                        'sustainability', 'artisan_support', 'shopping_style']
     
     for col in categorical_cols:
         if col in df_processed.columns:
@@ -179,6 +205,17 @@ def preprocess_data(df):
             # Ensure the column is treated as string for consistent encoding
             df_processed[f'{col}_encoded'] = le.fit_transform(df_processed[col].astype(str))
             label_encoders[col] = le
+            
+    # Also create a numeric version of monthly_spending for EDA/Dashboard
+    if 'monthly_spending' in df_processed.columns:
+        spending_map = {
+            '<1K': 500,
+            '1-3K': 2000,
+            '3-5K': 4000,
+            '5-10K': 7500,
+            '>10K': 12500
+        }
+        df_processed['monthly_spending_numeric'] = df_processed['monthly_spending'].map(spending_map).fillna(0)
     
     return df_processed, label_encoders
 
@@ -187,30 +224,242 @@ def get_feature_columns(df):
     return [col for col in df.columns if col.endswith('_encoded')] + \
            [col for col in df.columns if col in ['categories_interested', 'features_wanted']]
 
-# =============================================================================
-# TAB 1: ASSOCIATION RULE MINING
-# =============================================================================
+# ============================================================================
+# PAGE 1: HOME & DATA MANAGEMENT
+# ============================================================================
 
-def association_rules_tab(df):
-    st.header("🔗 Association Rule Mining")
-    st.markdown("Discover patterns in customer shopping behavior")
+def page_home():
+    st.markdown('<h2 class="sub-header">🏠 Welcome to the Shopizz Analytics Suite</h2>', 
+                unsafe_allow_html=True)
+    
+    # STATUS INDICATOR
+    st.markdown("### 📊 Data Status")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.session_state.df is not None:
+            st.success("✅ Data Loaded")
+        else:
+            st.error("❌ No Data")
+    
+    with col2:
+        if st.session_state.df_processed is not None:
+            st.success("✅ Data Processed")
+        else:
+            st.warning("⚠️ Data Not Processed")
+    
+    with col3:
+        if st.session_state.df is not None:
+            st.info(f"📊 {len(st.session_state.df)} rows")
+        else:
+            st.info("📊 0 rows")
+    
+    st.markdown("---")
+    
+    # Data Upload Section
+    st.markdown("### 📁 STEP 1: Load Data")
+    
+    tab1, tab2, tab3 = st.tabs(["🎲 Generate Sample Data", "📤 Upload CSV", "🔗 Load from GitHub"])
+    
+    with tab1:
+        st.markdown("**Generate synthetic customer data for testing**")
+        n_samples = st.slider("Number of samples to generate", 100, 2000, 1000, 100)
+        
+        if st.button("🎲 Generate Synthetic Data", type="primary"):
+            with st.spinner("Generating synthetic data..."):
+                df = generate_synthetic_data(n_samples)
+                st.session_state.df = df
+                st.session_state.df_processed = None # Reset processed data
+                st.session_state.label_encoders = None
+                st.session_state.analysis_results = {}
+                st.success(f"✅ Generated {n_samples} synthetic records!")
+                st.rerun()
+
+    with tab2:
+        st.markdown("**Upload your customer data CSV file**")
+        uploaded_file = st.file_uploader("Choose a CSV file", type=['csv'], key="csv_upload_main")
+        
+        if uploaded_file is not None:
+            with st.spinner("Loading data..."):
+                df, error = load_data(uploaded_file)
+                if error:
+                    st.error(f"Error loading data: {error}")
+                else:
+                    st.session_state.df = df
+                    st.session_state.df_processed = None
+                    st.session_state.label_encoders = None
+                    st.session_state.analysis_results = {}
+                    st.success(f"✅ Data loaded successfully! {len(df)} rows")
+                    st.rerun()
+
+    with tab3:
+        st.markdown("**Load data from a GitHub Raw URL**")
+        github_url = st.text_input(
+            "GitHub Raw URL",
+            placeholder="https://raw.githubusercontent.com/..."
+        )
+        if st.button("🔗 Load from GitHub"):
+            with st.spinner("Loading data from GitHub..."):
+                df, error = load_data_from_github(github_url)
+                if error:
+                    st.error(f"Error loading data: {error}")
+                else:
+                    st.session_state.df = df
+                    st.session_state.df_processed = None
+                    st.session_state.label_encoders = None
+                    st.session_state.analysis_results = {}
+                    st.success(f"✅ Data loaded successfully! {len(df)} rows")
+                    st.rerun()
+
+    # Show data preview if loaded
+    if st.session_state.df is not None:
+        with st.expander("👀 Preview Loaded Data (Click to expand)"):
+            st.dataframe(st.session_state.df.head(10), use_container_width=True)
+            
+    # STEP 2: PROCESS DATA
+    st.markdown("---")
+    st.markdown("### 🔧 STEP 2: Process Data (REQUIRED for Analysis)")
+    
+    if st.session_state.df is not None:
+        if st.session_state.df_processed is not None:
+            st.success("✅ Data is already processed and ready for analysis!")
+            with st.expander("📊 View Processed Data Summary"):
+                st.dataframe(st.session_state.df_processed.head(5), use_container_width=True)
+        else:
+            st.info("⚠️ Click the button below to process your data before running any analysis")
+            
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                if st.button("🔧 PROCESS DATA NOW", type="primary", use_container_width=True):
+                    with st.spinner("Processing data and creating features..."):
+                        try:
+                            df_processed, label_encoders = process_data(st.session_state.df)
+                            
+                            st.session_state.df_processed = df_processed
+                            st.session_state.label_encoders = label_encoders
+                            
+                            st.success("✅ Data processed successfully!")
+                            st.balloons()
+                            
+                            new_cols = [c for c in df_processed.columns if c not in st.session_state.df.columns]
+                            st.markdown(f"**Created {len(new_cols)} new features:**")
+                            st.write(new_cols)
+                            st.info("🎉 You can now use all analysis features from the sidebar!")
+
+                        except Exception as e:
+                            st.error(f"Error processing data: {str(e)}")
+                            st.error("Please check your data format and try again")
+    else:
+        st.warning("⚠️ Please load data first (Step 1 above)")
+
+
+# ============================================================================
+# PAGE 2: EXPLORATORY DATA ANALYSIS (New)
+# ============================================================================
+
+def page_eda():
+    st.markdown('<h2 class="sub-header">📊 Exploratory Data Analysis</h2>', 
+                unsafe_allow_html=True)
+    
+    if st.session_state.df_processed is None:
+        st.warning("⚠️ Please load and process data from the 'Home' page first.")
+        return
+    
+    df = st.session_state.df
+    df_processed = st.session_state.df_processed
+    
+    tab1, tab2, tab3 = st.tabs(["📈 Statistical Summary", "📊 Distributions", "🔗 Correlations"])
+    
+    with tab1:
+        st.markdown("### 📈 Numeric Data Summary")
+        numeric_cols = df_processed.select_dtypes(include=np.number).columns
+        st.dataframe(df_processed[numeric_cols].describe().T, use_container_width=True)
+        
+        st.markdown("### 📋 Categorical Data Summary")
+        categorical_cols = df.select_dtypes(include='object').columns
+        st.dataframe(df[categorical_cols].describe().T, use_container_width=True)
+
+    with tab2:
+        st.markdown("### 📊 Variable Distributions")
+        
+        # Select variable
+        all_cols = df.columns.tolist()
+        selected_var = st.selectbox("Select variable to visualize", all_cols, key="dist_select")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if df[selected_var].dtype in ['int64', 'float64']:
+                fig = px.histogram(df, x=selected_var, title=f'Distribution of {selected_var}',
+                                   marginal='box', color_discrete_sequence=['#667eea'])
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                value_counts = df[selected_var].value_counts()
+                fig = px.pie(values=value_counts.values, names=value_counts.index,
+                             title=f'Distribution of {selected_var}')
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            if 'monthly_spending_numeric' in df_processed.columns and selected_var in categorical_cols:
+                st.markdown(f"### 💰 Avg. Monthly Spending by {selected_var}")
+                avg_spending = df_processed.groupby(selected_var)['monthly_spending_numeric'].mean().sort_values()
+                fig = px.bar(avg_spending, y=avg_spending.index, x=avg_spending.values,
+                             title=f'Avg. Monthly Spending by {selected_var}',
+                             labels={'y': selected_var, 'x': 'Avg. Spending ($)'},
+                             orientation='h')
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Select a categorical variable to see its relation to spending.")
+
+    with tab3:
+        st.markdown("### 🔗 Correlation Analysis")
+        numeric_cols = df_processed.select_dtypes(include=np.number).columns
+        
+        if len(numeric_cols) > 1:
+            corr_matrix = df_processed[numeric_cols].corr()
+            
+            fig = px.imshow(corr_matrix,
+                            labels=dict(color="Correlation"),
+                            x=corr_matrix.columns,
+                            y=corr_matrix.columns,
+                            color_continuous_scale='RdBu_r',
+                            aspect="auto",
+                            title="Correlation Matrix of Numeric Features")
+            fig.update_layout(height=600)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough numeric features for a correlation matrix.")
+
+# ============================================================================
+# PAGE 3: ASSOCIATION RULE MINING (FIXED)
+# ============================================================================
+
+def page_association_rules():
+    st.markdown('<h2 class="sub-header">🔗 Association Rule Mining</h2>', 
+                unsafe_allow_html=True)
+
+    if st.session_state.df is None:
+        st.warning("⚠️ Please load data from the 'Home' page first.")
+        return
+        
+    df = st.session_state.df
     
     # Validation Check
     if 'cart_items' not in df.columns:
-        st.error("⚠️ The DataFrame is missing the required column **'cart_items'** for Association Rule Mining. Please use the Sample Data or upload a file with transaction items in a column named 'cart_items'.")
+        st.error("⚠️ The DataFrame is missing the required column **'cart_items'**. This analysis cannot be run.")
         return
         
     col1, col2, col3 = st.columns(3)
     
     with col1:
         min_support = st.slider("Minimum Support", 0.01, 0.5, 0.1, 0.01,
-                               help="Minimum frequency of itemset")
+                                help="Minimum frequency of itemset")
     with col2:
         min_confidence = st.slider("Minimum Confidence", 0.1, 0.9, 0.7, 0.05,
-                                  help="Minimum probability of rule")
+                                   help="Minimum probability of rule")
     with col3:
         min_lift = st.slider("Minimum Lift", 1.0, 5.0, 1.2, 0.1,
-                            help="Minimum improvement over random")
+                             help="Minimum improvement over random")
     
     if st.button("🔍 Mine Association Rules", type="primary"):
         with st.spinner("Mining association rules..."):
@@ -239,12 +488,19 @@ def association_rules_tab(df):
             
             # Generate rules
             rules = association_rules(frequent_itemsets, metric="confidence", 
-                                     min_threshold=min_confidence)
+                                      min_threshold=min_confidence)
             rules = rules[rules['lift'] >= min_lift]
             
             if len(rules) == 0:
                 st.warning("No rules found. Try adjusting the thresholds.")
                 return
+            
+            # --- START: FIX FOR JSON SERIALIZABLE ERROR ---
+            # Create a copy for visualization and convert frozensets to strings
+            rules_for_viz = rules.copy()
+            rules_for_viz['antecedents'] = rules_for_viz['antecedents'].apply(lambda x: ', '.join(list(x)))
+            rules_for_viz['consequents'] = rules_for_viz['consequents'].apply(lambda x: ', '.join(list(x)))
+            # --- END: FIX ---
             
             # Display metrics
             col1, col2, col3 = st.columns(3)
@@ -255,8 +511,8 @@ def association_rules_tab(df):
             with col3:
                 st.metric("Avg Lift", f"{rules['lift'].mean():.2f}")
             
-            # Top rules
-            st.subheader("📊 Top 10 Rules by Lift")
+            # Top rules (use original 'rules' df for logic, but display converted strings)
+            st.markdown("### 📊 Top 10 Rules by Lift")
             top_rules = rules.nlargest(10, 'lift').reset_index(drop=True)
             
             display_rules = top_rules.copy()
@@ -273,8 +529,10 @@ def association_rules_tab(df):
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("📈 Support vs Confidence")
-                fig = px.scatter(rules, x='support', y='confidence', size='lift',
+                st.markdown("### 📈 Support vs Confidence")
+                
+                # --- MODIFIED LINE: Use 'rules_for_viz' DataFrame ---
+                fig = px.scatter(rules_for_viz, x='support', y='confidence', size='lift',
                                color='lift', hover_data=['antecedents', 'consequents'],
                                title='Association Rules',
                                labels={'support': 'Support', 'confidence': 'Confidence', 'lift': 'Lift'})
@@ -282,126 +540,57 @@ def association_rules_tab(df):
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                st.subheader("🎯 Top Rules by Metric")
+                st.markdown("### 🎯 Top Rules by Metric")
                 metric_choice = st.selectbox("Select Metric", ['lift', 'confidence', 'support'])
-                top_n = rules.nlargest(10, metric_choice)
+                
+                # Use the 'rules_for_viz' df here too for consistency
+                top_n = rules_for_viz.nlargest(10, metric_choice)
                 
                 fig = go.Figure(go.Bar(
                     x=top_n[metric_choice],
-                    y=[f"Rule {i+1}" for i in range(len(top_n))],
+                    y=top_n.index, # Use index or a rule identifier
                     orientation='h',
-                    marker=dict(color=top_n[metric_choice], colorscale='Viridis')
+                    marker=dict(color=top_n[metric_choice], colorscale='Viridis'),
+                    # Add hover text with the converted strings
+                    text=top_n.apply(lambda row: f"IF {row['antecedents']} THEN {row['consequents']}", axis=1),
+                    hoverinfo="text+x"
                 ))
                 fig.update_layout(
                     title=f'Top 10 Rules by {metric_choice.capitalize()}',
                     xaxis_title=metric_choice.capitalize(),
                     yaxis_title='Rule',
+                    yaxis=dict(autorange="reversed"), # Show top rule at the top
                     height=500
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Network Graph
-            st.subheader("🕸️ Rules Network Graph")
-            
-            # Filter rules for visualization to keep it manageable
-            graph_rules = rules.nlargest(min(20, len(rules)), 'lift')
-            
-            if len(graph_rules) > 1:
-                G = nx.DiGraph()
-                for _, rule in graph_rules.iterrows():
-                    # Convert frozensets to strings for node labels
-                    antecedents = ', '.join(list(rule['antecedents']))
-                    consequents = ', '.join(list(rule['consequents']))
-                    G.add_edge(antecedents, consequents, weight=rule['lift'])
-                
-                # Use a larger k value for spring layout to spread nodes out
-                pos = nx.spring_layout(G, k=0.8/np.sqrt(len(G.nodes())), iterations=50)
-                
-                edge_x = []
-                edge_y = []
-                for edge in G.edges():
-                    x0, y0 = pos[edge[0]]
-                    x1, y1 = pos[edge[1]]
-                    edge_x.extend([x0, x1, None])
-                    edge_y.extend([y0, y1, None])
-                
-                edge_trace = go.Scatter(
-                    x=edge_x, y=edge_y,
-                    line=dict(width=0.5, color='#888'),
-                    hoverinfo='none',
-                    mode='lines')
-                
-                node_x = []
-                node_y = []
-                node_text = []
-                for node in G.nodes():
-                    x, y = pos[node]
-                    node_x.append(x)
-                    node_y.append(y)
-                    node_text.append(node)
-                
-                node_trace = go.Scatter(
-                    x=node_x, y=node_y,
-                    mode='markers+text',
-                    hoverinfo='text',
-                    text=node_text,
-                    textposition="top center",
-                    marker=dict(
-                        showscale=True,
-                        colorscale='YlOrRd',
-                        size=20,
-                        colorbar=dict(
-                            thickness=15,
-                            title='Node Connections',
-                            xanchor='left',
-                            titleside='right'
-                        )
-                    ))
-                
-                fig = go.Figure(data=[edge_trace, node_trace],
-                             layout=go.Layout(
-                                title=f'Association Rules Network (Top {len(graph_rules)} Rules)',
-                                showlegend=False,
-                                hovermode='closest',
-                                height=600,
-                                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
-                             )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Network graph not shown as there are few or no rules to visualize.")
-            
-            # Download
-            st.subheader("💾 Download Results")
-            col1, col2 = st.columns(2)
-            with col1:
-                csv = convert_df_to_csv(display_rules)
-                st.download_button("📥 Download Rules (CSV)", csv, 
-                                 "association_rules.csv", "text/csv")
-            with col2:
-                excel = convert_df_to_excel(display_rules)
-                st.download_button("📥 Download Rules (Excel)", excel,
-                                 "association_rules.xlsx", 
-                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # Store the user-friendly string version
+            st.session_state.analysis_results['association_rules'] = display_rules
 
-# =============================================================================
-# TAB 2: CLASSIFICATION
-# =============================================================================
+# ============================================================================
+# PAGE 4: CLASSIFICATION ANALYSIS
+# ============================================================================
 
-def classification_tab(df):
-    st.header("🎯 Classification Analysis")
-    st.markdown("Predict customer behavior and segment classification")
+def page_classification():
+    st.markdown('<h2 class="sub-header">🎯 Classification Analysis</h2>', 
+                unsafe_allow_html=True)
+    
+    if st.session_state.df_processed is None:
+        st.warning("⚠️ Please load and process data from the 'Home' page first.")
+        return
+
+    df_processed = st.session_state.df_processed
     
     # Validation Check
     required_cols = ['will_subscribe', 'willingness_to_pay_class']
-    if not all(col in df.columns for col in required_cols):
-        st.error("⚠️ The DataFrame is missing required target columns for Classification ('will_subscribe' or 'willingness_to_pay_class'). Please use the Sample Data or upload a file with these columns.")
+    if not all(col in df_processed.columns for col in required_cols):
+        st.error("⚠️ The DataFrame is missing required target columns ('will_subscribe' or 'willingness_to_pay_class').")
         return
         
     # Target selection
     target_type = st.radio("Classification Type", 
-                          ["Binary (Subscribe/Not Subscribe)", 
-                           "Multi-Class (Willingness to Pay - 5 levels)"])
+                           ["Binary (Subscribe/Not Subscribe)", 
+                            "Multi-Class (Willingness to Pay - 5 levels)"])
     
     if target_type.startswith("Binary"):
         target_col = 'will_subscribe'
@@ -411,7 +600,7 @@ def classification_tab(df):
         target_names = ['Very Low', 'Low', 'Medium', 'High', 'Very High']
     
     # Model selection
-    st.subheader("🤖 Model Selection")
+    st.markdown("### 🤖 Model Selection")
     
     available_models = ['Logistic Regression', 'Random Forest', 'SVM']
     if XGBClassifier:
@@ -427,28 +616,24 @@ def classification_tab(df):
         st.warning("Please select at least one model")
         return
     
-    test_size = st.slider("Test Set Size (%)", 10, 40, 25) / 100
+    test_size = st.slider("Test Set Size (%)", 10, 40, 25, key="clf_test_size") / 100
     
-    if st.button("🚀 Train Models", type="primary"):
+    if st.button("🚀 Train Classification Models", type="primary"):
         with st.spinner("Training models..."):
-            # Preprocess data
-            df_processed, label_encoders = preprocess_data(df)
             
             # Prepare features and target
             feature_cols = get_feature_columns(df_processed)
             X = df_processed[feature_cols]
             y = df_processed[target_col]
             
-            # Check for empty feature set before split/scaling
             if X.empty or X.shape[0] < 2:
-                st.error("🚨 The feature matrix is empty or too small. Check if the original demographic columns were present in the loaded data.")
+                st.error("🚨 The feature matrix is empty. Check data processing.")
                 return
 
             # Encode target if multi-class
             if target_type.startswith("Multi"):
                 le_target = LabelEncoder()
                 y = le_target.fit_transform(y)
-                # Filter target names to only include present classes
                 present_classes = sorted(np.unique(y))
                 target_names = [target_names[i] for i in present_classes]
             
@@ -479,25 +664,16 @@ def classification_tab(df):
                 if model is None:
                     continue
 
-                # Train
                 model.fit(X_train_scaled, y_train)
-                
-                # Predict
                 y_pred = model.predict(X_test_scaled)
                 y_pred_proba = model.predict_proba(X_test_scaled)
                 
-                # Metrics
-                accuracy = accuracy_score(y_test, y_pred)
-                precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-                recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-                f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-                
                 results[model_name] = {
                     'model': model,
-                    'accuracy': accuracy,
-                    'precision': precision,
-                    'recall': recall,
-                    'f1': f1,
+                    'accuracy': accuracy_score(y_test, y_pred),
+                    'precision': precision_score(y_test, y_pred, average='weighted', zero_division=0),
+                    'recall': recall_score(y_test, y_pred, average='weighted', zero_division=0),
+                    'f1': f1_score(y_test, y_pred, average='weighted', zero_division=0),
                     'y_pred': y_pred,
                     'y_pred_proba': y_pred_proba
                 }
@@ -506,11 +682,10 @@ def classification_tab(df):
                 st.warning("No models were successfully trained.")
                 return
 
-            # Display results
             st.success("✅ Models trained successfully!")
             
             # Metrics comparison
-            st.subheader("📊 Model Performance Comparison")
+            st.markdown("### 📊 Model Performance Comparison")
             metrics_df = pd.DataFrame({
                 'Model': list(results.keys()),
                 'Accuracy': [r['accuracy'] for r in results.values()],
@@ -534,40 +709,37 @@ def classification_tab(df):
             col1, col2 = st.columns(2)
             
             with col1:
-                # Confusion Matrix
-                st.subheader("🔢 Confusion Matrix")
+                st.markdown("### 🔢 Confusion Matrix")
                 cm = confusion_matrix(y_test, best_result['y_pred'])
                 
                 fig = px.imshow(cm, 
-                              labels=dict(x="Predicted", y="Actual", color="Count"),
-                              x=target_names[:len(np.unique(y_test))],
-                              y=target_names[:len(np.unique(y_test))],
-                              color_continuous_scale='Blues',
-                              text_auto=True)
+                                labels=dict(x="Predicted", y="Actual", color="Count"),
+                                x=target_names[:len(np.unique(y_test))],
+                                y=target_names[:len(np.unique(y_test))],
+                                color_continuous_scale='Blues',
+                                text_auto=True)
                 fig.update_layout(height=500)
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                # Metrics comparison chart
-                st.subheader("📈 Metrics Comparison")
+                st.markdown("### 📈 Metrics Comparison")
                 fig = go.Figure()
-                
                 metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
                 for model_name in results.keys():
                     values = [results[model_name]['accuracy'], 
-                            results[model_name]['precision'],
-                            results[model_name]['recall'],
-                            results[model_name]['f1']]
+                              results[model_name]['precision'],
+                              results[model_name]['recall'],
+                              results[model_name]['f1']]
                     fig.add_trace(go.Bar(name=model_name, x=metrics, y=values))
                 
                 fig.update_layout(barmode='group', height=500,
-                                title='Model Metrics Comparison')
+                                  title='Model Metrics Comparison')
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Feature Importance (for Random Forest)
+            # Feature Importance
             importance_model_name = next((m for m in ['Random Forest', 'XGBoost'] if m in results), None)
             if importance_model_name:
-                st.subheader(f"🔍 Feature Importance ({importance_model_name})")
+                st.markdown(f"### 🔍 Feature Importance ({importance_model_name})")
                 model = results[importance_model_name]['model']
                 feature_importance = pd.DataFrame({
                     'Feature': feature_cols,
@@ -579,76 +751,35 @@ def classification_tab(df):
                 fig.update_layout(height=400)
                 st.plotly_chart(fig, use_container_width=True)
             
-            # ROC Curve (for binary classification)
-            if target_type.startswith("Binary"):
-                st.subheader("📉 ROC Curves")
-                fig = go.Figure()
-                
-                for model_name, result in results.items():
-                    if result['y_pred_proba'].shape[1] == 2:
-                        fpr, tpr, _ = roc_curve(y_test, result['y_pred_proba'][:, 1])
-                        roc_auc = auc(fpr, tpr)
-                        fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines',
-                                               name=f'{model_name} (AUC = {roc_auc:.3f})'))
-                
-                fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines',
-                                       name='Random Classifier', line=dict(dash='dash')))
-                fig.update_layout(
-                    title='ROC Curves',
-                    xaxis_title='False Positive Rate',
-                    yaxis_title='True Positive Rate',
-                    height=500
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Classification Report
-            st.subheader("📋 Detailed Classification Report")
-            report = classification_report(y_test, best_result['y_pred'], 
-                                         target_names=target_names[:len(np.unique(y_test))],
-                                         output_dict=True)
-            report_df = pd.DataFrame(report).transpose()
-            st.dataframe(report_df.style.background_gradient(cmap='RdYlGn', subset=['f1-score']),
-                        use_container_width=True)
-            
-            # Download predictions
-            st.subheader("💾 Download Results")
-            predictions_df = pd.DataFrame({
-                'Actual': y_test,
-                'Predicted': best_result['y_pred'],
-                'Correct': y_test == best_result['y_pred']
-            })
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                csv = convert_df_to_csv(predictions_df)
-                st.download_button("📥 Download Predictions (CSV)", csv,
-                                 "predictions.csv", "text/csv")
-            with col2:
-                csv_metrics = convert_df_to_csv(metrics_df)
-                st.download_button("📥 Download Metrics (CSV)", csv_metrics,
-                                 "model_metrics.csv", "text/csv")
+            # Store results
+            st.session_state.analysis_results['classification'] = metrics_df
 
-# =============================================================================
-# TAB 3: CLUSTERING
-# =============================================================================
+# ============================================================================
+# PAGE 5: CUSTOMER CLUSTERING
+# ============================================================================
 
-def clustering_tab(df):
-    st.header("👥 Customer Clustering Analysis")
-    st.markdown("Segment customers into distinct groups")
+def page_clustering():
+    st.markdown('<h2 class="sub-header">👥 Customer Clustering Analysis</h2>', 
+                unsafe_allow_html=True)
     
-    # Preprocess data once for feature selection
-    df_processed, _ = preprocess_data(df)
+    if st.session_state.df_processed is None:
+        st.warning("⚠️ Please load and process data from the 'Home' page first.")
+        return
 
+    df = st.session_state.df
+    df_processed = st.session_state.df_processed
+    
     # Feature selection
-    st.subheader("📊 Select Features for Clustering")
-    feature_options = ['age_group', 'gender', 'location', 'income', 'monthly_spending',
-                      'sustainability', 'artisan_support', 'shopping_style',
-                      'categories_interested', 'features_wanted']
-    
+    st.markdown("### 📊 Select Features for Clustering")
+    all_numeric_cols = df_processed.select_dtypes(include=np.number).columns.tolist()
+    # Exclude target variables from default selection
+    features_to_exclude = ['willingness_to_pay_numeric', 'will_subscribe']
+    default_features = [col for col in all_numeric_cols if col not in features_to_exclude]
+
     selected_features = st.multiselect(
         "Select features",
-        feature_options,
-        default=['income', 'monthly_spending', 'sustainability', 'categories_interested']
+        all_numeric_cols,
+        default=default_features[:min(5, len(default_features))]
     )
     
     if len(selected_features) < 2:
@@ -659,13 +790,8 @@ def clustering_tab(df):
     col1, col2 = st.columns(2)
     with col1:
         algorithm = st.selectbox("Clustering Algorithm", 
-                                ['K-Means', 'Hierarchical', 'DBSCAN'])
+                                 ['K-Means', 'Hierarchical', 'DBSCAN'])
         
-    # Initialize default values outside the button block for robustness
-    n_clusters = 4 
-    eps = 0.5      
-    min_samples = 5 
-    
     with col2:
         if algorithm != 'DBSCAN':
             n_clusters = st.slider("Number of Clusters", 2, 10, 4)
@@ -676,26 +802,11 @@ def clustering_tab(df):
     if st.button("🔬 Perform Clustering", type="primary"):
         with st.spinner("Performing clustering analysis..."):
             
-            # Select features (using encoded/numeric columns)
-            feature_cols = [f'{f}_encoded' if f in ['age_group', 'gender', 'location', 'income',
-                                                     'monthly_spending', 'sustainability',
-                                                     'artisan_support', 'shopping_style'] 
-                          else f for f in selected_features]
-            
-            # Filter df_processed to ensure all columns exist
-            feature_cols = [col for col in feature_cols if col in df_processed.columns]
-
-            # Validation to prevent InvalidParameterError
-            if not feature_cols:
-                st.error("🚨 Selected features could not be found or encoded in the current DataFrame. Please ensure the data includes the selected columns or use the Sample Data.")
-                return
-
-            X = df_processed[feature_cols]
+            X = df_processed[selected_features].copy().fillna(0) # Simple fillna
 
             if X.empty or X.shape[0] < 2:
-                st.error("🚨 The resulting feature matrix is empty or contains too few samples to perform clustering. Please check your selected features or the loaded data.")
+                st.error("🚨 The resulting feature matrix is empty.")
                 return
-            # End Validation
             
             # Scale features
             scaler = StandardScaler()
@@ -710,7 +821,7 @@ def clustering_tab(df):
             elif algorithm == 'Hierarchical':
                 model = AgglomerativeClustering(n_clusters=n_clusters)
                 labels = model.fit_predict(X_scaled)
-            else:  # DBSCAN
+            else: # DBSCAN
                 model = DBSCAN(eps=eps, min_samples=min_samples)
                 labels = model.fit_predict(X_scaled)
                 n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
@@ -725,7 +836,7 @@ def clustering_tab(df):
             else:
                 silhouette = 0
                 davies_bouldin = 0
-                st.warning("Found 1 or 0 meaningful clusters (or only noise). Metrics are 0.")
+                st.warning("Found 1 or 0 meaningful clusters. Metrics are 0.")
 
             st.success(f"✅ Clustering complete! Found {n_clusters} clusters")
             
@@ -735,191 +846,66 @@ def clustering_tab(df):
                 st.metric("Number of Clusters", n_clusters)
             with col2:
                 st.metric("Silhouette Score", f"{silhouette:.4f}",
-                         help="Higher is better (range: -1 to 1)")
+                          help="Higher is better (range: -1 to 1)")
             with col3:
                 st.metric("Davies-Bouldin Index", f"{davies_bouldin:.4f}",
-                         help="Lower is better")
+                          help="Lower is better")
             
             # Cluster sizes
-            st.subheader("📊 Cluster Distribution")
+            st.markdown("### 📊 Cluster Distribution")
             cluster_sizes = pd.Series(labels).value_counts().sort_index()
             
             fig = go.Figure(data=[
                 go.Bar(x=[f'Cluster {i}' if i != -1 else 'Noise' for i in cluster_sizes.index],
-                      y=cluster_sizes.values,
-                      marker_color=px.colors.qualitative.Set3[:len(cluster_sizes)])
+                       y=cluster_sizes.values,
+                       marker_color=px.colors.qualitative.Set3[:len(cluster_sizes)])
             ])
             fig.update_layout(title='Number of Customers per Cluster', height=400)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Cluster profiles
-            st.subheader("👥 Cluster Personas")
+            # PCA visualization
+            st.markdown("### 🎨 PCA Visualization")
             
-            # Calculate cluster statistics
-            cluster_profiles = []
-            for cluster_id in sorted(set(labels)):
-                if cluster_id == -1:
-                    continue
+            if X_scaled.shape[1] >= 2:
+                pca = PCA(n_components=2)
+                X_pca = pca.fit_transform(X_scaled)
                 
-                cluster_data = df[df_processed['Cluster'] == cluster_id]
-                profile = {
-                    'Cluster': f'Cluster {cluster_id}',
-                    'Size': len(cluster_data),
-                    'Size %': f"{len(cluster_data)/len(df)*100:.1f}%"
-                }
+                pca_df = pd.DataFrame({
+                    'PC1': X_pca[:, 0],
+                    'PC2': X_pca[:, 1],
+                    'Cluster': [f'Cluster {l}' if l != -1 else 'Noise' for l in labels]
+                })
                 
-                # Add feature statistics
-                for feature in selected_features:
-                    if feature in ['categories_interested', 'features_wanted']:
-                        profile[feature] = f"{cluster_data[feature].mean():.1f}"
-                    else:
-                        mode_val = cluster_data[feature].mode()
-                        profile[feature] = mode_val[0] if len(mode_val) > 0 else 'N/A'
-                
-                cluster_profiles.append(profile)
+                fig = px.scatter(pca_df, x='PC1', y='PC2', color='Cluster',
+                                 title=f'Clusters in 2D PCA Space<br>Variance Explained: {sum(pca.explained_variance_ratio_)*100:.1f}%',
+                                 color_discrete_sequence=px.colors.qualitative.Set3)
+                fig.update_layout(height=450)
+                st.plotly_chart(fig, use_container_width=True)
             
-            profiles_df = pd.DataFrame(cluster_profiles)
-            st.dataframe(profiles_df, use_container_width=True)
-            
-            # Visualizations
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Elbow curve (for K-Means)
-                if algorithm == 'K-Means':
-                    st.subheader("📉 Elbow Curve")
-                    inertias = []
-                    K_range = range(2, 11)
-                    
-                    if X_scaled.shape[0] >= 11: 
-                        for k in K_range:
-                            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-                            kmeans.fit(X_scaled)
-                            inertias.append(kmeans.inertia_)
-                        
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=list(K_range), y=inertias, mode='lines+markers'))
-                        fig.add_vline(x=n_clusters, line_dash="dash", line_color="red",
-                                    annotation_text=f"Selected: {n_clusters}")
-                        fig.update_layout(
-                            title='Elbow Method',
-                            xaxis_title='Number of Clusters',
-                            yaxis_title='Inertia',
-                            height=400
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("Not enough data points to compute a meaningful Elbow Curve (K-Means).")
-                
-                # Silhouette scores
-                st.subheader("📊 Silhouette Analysis")
-                silhouette_scores = []
-                K_range = range(2, 11)
-                
-                if X_scaled.shape[0] >= 11:
-                    for k in K_range:
-                        if algorithm == 'K-Means':
-                            model_temp = KMeans(n_clusters=k, random_state=42, n_init=10)
-                        else:
-                            model_temp = AgglomerativeClustering(n_clusters=k)
-                        labels_temp = model_temp.fit_predict(X_scaled)
-                        score = silhouette_score(X_scaled, labels_temp)
-                        silhouette_scores.append(score)
-                    
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=list(K_range), y=silhouette_scores, 
-                                           mode='lines+markers'))
-                    fig.add_vline(x=n_clusters, line_dash="dash", line_color="red",
-                                annotation_text=f"Selected: {n_clusters}")
-                    fig.update_layout(
-                        title='Silhouette Score by Number of Clusters',
-                        xaxis_title='Number of Clusters',
-                        yaxis_title='Silhouette Score',
-                        height=400
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                     st.info("Not enough data points for detailed Silhouette Analysis.")
+            # Store results
+            st.session_state.analysis_results['cluster_assignments'] = df_processed[['customer_id', 'Cluster']]
 
-            
-            with col2:
-                # PCA visualization
-                st.subheader("🎨 PCA Visualization")
-                
-                if X_scaled.shape[1] >= 2:
-                    pca = PCA(n_components=2)
-                    X_pca = pca.fit_transform(X_scaled)
-                    
-                    pca_df = pd.DataFrame({
-                        'PC1': X_pca[:, 0],
-                        'PC2': X_pca[:, 1],
-                        'Cluster': [f'Cluster {l}' if l != -1 else 'Noise' for l in labels]
-                    })
-                    
-                    fig = px.scatter(pca_df, x='PC1', y='PC2', color='Cluster',
-                                   title=f'Clusters in 2D PCA Space<br>Variance Explained: {sum(pca.explained_variance_ratio_)*100:.1f}%',
-                                   color_discrete_sequence=px.colors.qualitative.Set3)
-                    fig.update_layout(height=450)
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("At least 2 features are required for PCA Visualization.")
-                
-                # 3D PCA (if enough components)
-                if len(selected_features) >= 3 and X_scaled.shape[1] >= 3:
-                    st.subheader("🎯 3D PCA Visualization")
-                    pca_3d = PCA(n_components=3)
-                    X_pca_3d = pca_3d.fit_transform(X_scaled)
-                    
-                    pca_3d_df = pd.DataFrame({
-                        'PC1': X_pca_3d[:, 0],
-                        'PC2': X_pca_3d[:, 1],
-                        'PC3': X_pca_3d[:, 2],
-                        'Cluster': [f'Cluster {l}' if l != -1 else 'Noise' for l in labels]
-                    })
-                    
-                    fig = px.scatter_3d(pca_3d_df, x='PC1', y='PC2', z='PC3', color='Cluster',
-                                      title='3D PCA Visualization',
-                                      color_discrete_sequence=px.colors.qualitative.Set3)
-                    fig.update_layout(height=450)
-                    st.plotly_chart(fig, use_container_width=True)
-                elif len(selected_features) >= 3:
-                    st.info("Not enough scaled features available for 3D PCA visualization.")
-            
-            # Download results
-            st.subheader("💾 Download Results")
-            results_df = df.copy()
-            results_df['Cluster'] = labels
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                csv = convert_df_to_csv(results_df)
-                st.download_button("📥 Download Cluster Assignments", csv,
-                                 "cluster_assignments.csv", "text/csv")
-            with col2:
-                csv_profiles = convert_df_to_csv(profiles_df)
-                st.download_button("📥 Download Cluster Profiles", csv_profiles,
-                                 "cluster_profiles.csv", "text/csv")
-            with col3:
-                excel = convert_df_to_excel(results_df)
-                st.download_button("📥 Download Full Results (Excel)", excel,
-                                 "clustering_results.xlsx",
-                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# =============================================================================
-# TAB 4: REGRESSION
-# =============================================================================
+# ============================================================================
+# PAGE 6: REGRESSION ANALYSIS
+# ============================================================================
 
-def regression_tab(df):
-    st.header("📈 Regression Analysis")
-    st.markdown("Predict customer willingness to pay")
-
-    # Validation Check
-    if 'willingness_to_pay_numeric' not in df.columns:
-        st.error("⚠️ The DataFrame is missing the required target column **'willingness_to_pay_numeric'** for Regression Analysis. Please use the Sample Data or upload a file with this column.")
-        return
+def page_regression():
+    st.markdown('<h2 class="sub-header">📈 Regression Analysis (Willingness to Pay)</h2>', 
+                unsafe_allow_html=True)
     
+    if st.session_state.df_processed is None:
+        st.warning("⚠️ Please load and process data from the 'Home' page first.")
+        return
+
+    df_processed = st.session_state.df_processed
+    
+    if 'willingness_to_pay_numeric' not in df_processed.columns:
+        st.error("⚠️ 'willingness_to_pay_numeric' column not found. Processing may have failed.")
+        return
+        
     # Model selection
-    st.subheader("🤖 Model Selection")
+    st.markdown("### 🤖 Model Selection")
     
     available_models = ['Linear Regression', 'Ridge', 'Lasso', 'Random Forest', 'Gradient Boosting']
     if XGBRegressor:
@@ -935,21 +921,18 @@ def regression_tab(df):
         st.warning("Please select at least one model")
         return
     
-    test_size = st.slider("Test Set Size (%)", 10, 40, 25) / 100
+    test_size = st.slider("Test Set Size (%)", 10, 40, 25, key="reg_test_size") / 100
     
-    if st.button("🚀 Train Models", type="primary"):
+    if st.button("🚀 Train Regression Models", type="primary"):
         with st.spinner("Training regression models..."):
-            # Preprocess data
-            df_processed, _ = preprocess_data(df)
             
             # Prepare features and target
             feature_cols = get_feature_columns(df_processed)
-            X = df_processed[feature_cols]
-            y = df_processed['willingness_to_pay_numeric']
+            X = df_processed[feature_cols].copy().fillna(0) # Simple fillna
+            y = df_processed['willingness_to_pay_numeric'].copy().fillna(0)
 
-            # Check for empty feature set before split/scaling
             if X.empty or X.shape[0] < 2:
-                st.error("🚨 The feature matrix is empty or too small. Check if the original demographic columns were present in the loaded data.")
+                st.error("🚨 The feature matrix is empty.")
                 return
             
             # Train-test split
@@ -983,35 +966,14 @@ def regression_tab(df):
                 if model is None:
                     continue
 
-                # Train
                 model.fit(X_train_scaled, y_train)
-                
-                # Predict
-                y_pred_train = model.predict(X_train_scaled)
                 y_pred_test = model.predict(X_test_scaled)
-                
-                # Metrics
-                train_r2 = r2_score(y_train, y_pred_train)
-                test_r2 = r2_score(y_test, y_pred_test)
-                rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
-                mae = mean_absolute_error(y_test, y_pred_test)
-                
-                # Adjusted R²
-                n = len(y_test)
-                p = X_test.shape[1]
-                if n > p + 1:
-                    adjusted_r2 = 1 - (1 - test_r2) * (n - 1) / (n - p - 1)
-                else:
-                    adjusted_r2 = np.nan
                 
                 results[model_name] = {
                     'model': model,
-                    'train_r2': train_r2,
-                    'test_r2': test_r2,
-                    'adjusted_r2': adjusted_r2,
-                    'rmse': rmse,
-                    'mae': mae,
-                    'y_pred_train': y_pred_train,
+                    'test_r2': r2_score(y_test, y_pred_test),
+                    'rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
+                    'mae': mean_absolute_error(y_test, y_pred_test),
                     'y_pred_test': y_pred_test
                 }
             
@@ -1019,23 +981,20 @@ def regression_tab(df):
                 st.warning("No models were successfully trained.")
                 return
 
-            # Display results
             st.success("✅ Models trained successfully!")
             
             # Metrics comparison
-            st.subheader("📊 Model Performance Comparison")
+            st.markdown("### 📊 Model Performance Comparison")
             metrics_df = pd.DataFrame({
                 'Model': list(results.keys()),
-                'Train R²': [r['train_r2'] for r in results.values()],
                 'Test R²': [r['test_r2'] for r in results.values()],
-                'Adjusted R²': [r['adjusted_r2'] for r in results.values()],
                 'RMSE': [r['rmse'] for r in results.values()],
                 'MAE': [r['mae'] for r in results.values()]
             }).sort_values('Test R²', ascending=False)
             
             st.dataframe(
-                metrics_df.style.background_gradient(cmap='RdYlGn', subset=['Test R²', 'Adjusted R²'])
-                                .background_gradient(cmap='RdYlGn_r', subset=['RMSE', 'MAE'], axis=0, vmin=metrics_df[['RMSE', 'MAE']].min().min(), vmax=metrics_df[['RMSE', 'MAE']].max().max()),
+                metrics_df.style.background_gradient(cmap='RdYlGn', subset=['Test R²'])
+                                .background_gradient(cmap='RdYlGn_r', subset=['RMSE', 'MAE']),
                 use_container_width=True
             )
             
@@ -1049,21 +1008,18 @@ def regression_tab(df):
             col1, col2 = st.columns(2)
             
             with col1:
-                # Actual vs Predicted
-                st.subheader("🎯 Actual vs Predicted")
+                st.markdown("### 🎯 Actual vs Predicted")
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=y_test, y=best_result['y_pred_test'],
-                                       mode='markers', name='Predictions',
-                                       marker=dict(color='blue', opacity=0.6)))
-                # Adjust range for 45-degree line
+                                         mode='markers', name='Predictions',
+                                         marker=dict(color='blue', opacity=0.6)))
                 min_val = min(y_test.min(), best_result['y_pred_test'].min())
                 max_val = max(y_test.max(), best_result['y_pred_test'].max())
                 
-                fig.add_trace(go.Scatter(x=[min_val, max_val],
-                                       y=[min_val, max_val],
-                                       mode='lines', name='Perfect Prediction',
-                                       line=dict(color='red', dash='dash')))
+                fig.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val],
+                                         mode='lines', name='Perfect Prediction',
+                                         line=dict(color='red', dash='dash')))
                 fig.update_layout(
                     title=f'{best_model_name} - Test Set',
                     xaxis_title='Actual Values',
@@ -1073,14 +1029,13 @@ def regression_tab(df):
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                # Residual plot
-                st.subheader("📉 Residual Analysis")
+                st.markdown("### 📉 Residual Analysis")
                 residuals = y_test - best_result['y_pred_test']
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=best_result['y_pred_test'], y=residuals,
-                                       mode='markers',
-                                       marker=dict(color='red', opacity=0.6)))
+                                         mode='markers',
+                                         marker=dict(color='red', opacity=0.6)))
                 fig.add_hline(y=0, line_dash="dash", line_color="black")
                 fig.update_layout(
                     title='Residual Plot',
@@ -1090,27 +1045,11 @@ def regression_tab(df):
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Metrics comparison chart
-            st.subheader("📊 Metrics Comparison Across Models")
-            
-            fig = go.Figure()
-            fig.add_trace(go.Bar(name='Test R²', x=list(results.keys()),
-                               y=[r['test_r2'] for r in results.values()],
-                               marker_color='lightblue'))
-            valid_adj_r2 = [r['adjusted_r2'] if not pd.isna(r['adjusted_r2']) else 0 for r in results.values()]
-
-            fig.add_trace(go.Bar(name='Adjusted R²', x=list(results.keys()),
-                               y=valid_adj_r2,
-                               marker_color='lightgreen'))
-            fig.update_layout(barmode='group', height=400,
-                            title='R² Comparison')
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Feature importance (for tree-based models)
+            # Feature importance
             importance_model_name = next((m for m in ['Random Forest', 'Gradient Boosting', 'XGBoost'] if m in results), None)
             if importance_model_name:
-                st.subheader(f"🔍 Feature Importance ({importance_model_name})")
-                model = best_result['model']
+                st.markdown(f"### 🔍 Feature Importance ({importance_model_name})")
+                model = results[importance_model_name]['model']
                 feature_importance = pd.DataFrame({
                     'Feature': feature_cols,
                     'Importance': model.feature_importances_
@@ -1120,104 +1059,54 @@ def regression_tab(df):
                            orientation='h', title='Top 15 Most Important Features')
                 fig.update_layout(height=500)
                 st.plotly_chart(fig, use_container_width=True)
-            
-            # Residual distribution
-            st.subheader("📊 Residual Distribution")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                fig = px.histogram(residuals, nbins=30, title='Histogram of Residuals')
-                fig.update_layout(xaxis_title='Residuals', yaxis_title='Frequency', height=400)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                # Q-Q Plot
-                fig = go.Figure()
-                stats_result = stats.probplot(residuals, dist="norm")
-                fig.add_trace(go.Scatter(x=stats_result[0][0], y=stats_result[0][1],
-                                       mode='markers', name='Data'))
-                fig.add_trace(go.Scatter(x=stats_result[0][0],
-                                       y=stats_result[1][0] * stats_result[0][0] + stats_result[1][1],
-                                       mode='lines', name='Normal Distribution',
-                                       line=dict(color='red', dash='dash')))
-                fig.update_layout(title='Q-Q Plot', xaxis_title='Theoretical Quantiles',
-                                yaxis_title='Sample Quantiles', height=400)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Download results
-            st.subheader("💾 Download Results")
-            predictions_df = pd.DataFrame({
-                'Actual': y_test,
-                'Predicted': best_result['y_pred_test'],
-                'Residual': residuals
-            })
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                csv = convert_df_to_csv(predictions_df)
-                st.download_button("📥 Download Predictions", csv,
-                                 "predictions.csv", "text/csv")
-            with col2:
-                csv_metrics = convert_df_to_csv(metrics_df)
-                st.download_button("📥 Download Metrics", csv_metrics,
-                                 "model_metrics.csv", "text/csv")
-            with col3:
-                if importance_model_name:
-                    csv_importance = convert_df_to_csv(feature_importance)
-                    st.download_button("📥 Download Feature Importance", csv_importance,
-                                     "feature_importance.csv", "text/csv")
+                st.session_state.analysis_results['feature_importance'] = feature_importance
 
-# =============================================================================
-# TAB 5: DYNAMIC PRICING
-# =============================================================================
+            # --- IMPORTANT: Save model for Dynamic Pricing ---
+            st.session_state.best_regression_model = best_result['model']
+            st.session_state.regression_scaler = scaler
+            st.session_state.regression_features = feature_cols
+            st.session_state.analysis_results['regression'] = metrics_df
+            st.success("✅ Best regression model saved for use in the 'Dynamic Pricing Engine'!")
 
-def dynamic_pricing_tab(df):
-    st.header("💰 Dynamic Pricing Engine")
-    st.markdown("Get personalized price recommendations based on customer profile")
 
-    # Validation Check
-    if 'willingness_to_pay_numeric' not in df.columns:
-        st.error("⚠️ The DataFrame is missing the required column **'willingness_to_pay_numeric'** for Dynamic Pricing. Please use the Sample Data or upload a file with this column.")
+# ============================================================================
+# PAGE 7: DYNAMIC PRICING ENGINE
+# ============================================================================
+
+def page_dynamic_pricing():
+    st.markdown('<h2 class="sub-header">💰 Dynamic Pricing Engine</h2>', 
+                unsafe_allow_html=True)
+    
+    if 'best_regression_model' not in st.session_state:
+        st.error("🚨 Please run a model on the 'Regression Analysis' page first!")
+        st.info("The Dynamic Pricing Engine uses the best model from that page to make predictions.")
         return
-    
-    st.info("ℹ️ This tool uses the regression model to predict willingness to pay and suggests optimal pricing.")
-    
-    # Train a quick model for pricing
-    with st.spinner("Loading pricing model..."):
-        try:
-            df_processed, label_encoders = preprocess_data(df)
-            feature_cols = get_feature_columns(df_processed)
-            X = df_processed[feature_cols]
-            y = df_processed['willingness_to_pay_numeric']
+        
+    if st.session_state.label_encoders is None:
+        st.error("🚨 Label encoders not found. Please re-process data on the 'Home' page.")
+        return
 
-            if X.empty or X.shape[0] < 2:
-                st.error("🚨 Cannot train pricing model: Feature matrix is empty or too small.")
-                return
-            
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            
-            # Train Random Forest (best performing model typically)
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X_scaled, y)
-        except Exception as e:
-            st.error(f"Failed to train the pricing model. Ensure data integrity. Error: {e}")
-            return
-    
-    st.success("✅ Pricing model loaded!")
+    # Load the trained model and components
+    model = st.session_state.best_regression_model
+    scaler = st.session_state.regression_scaler
+    feature_cols = st.session_state.regression_features
+    label_encoders = st.session_state.label_encoders
+    df = st.session_state.df # Get raw df for options
+
+    st.success("✅ Pricing model loaded successfully (using the best model from Regression page).")
     
     # Customer input form
-    st.subheader("👤 Customer Profile Input")
+    st.markdown("### 👤 Customer Profile Input")
     
-    # Get available categories dynamically (safer for uploaded data)
-    age_groups = df['age_group'].unique() if 'age_group' in df.columns else ['18-24']
-    genders = df['gender'].unique() if 'gender' in df.columns else ['Male']
-    locations = df['location'].unique() if 'location' in df.columns else ['Metro']
-    income_levels = df['income'].unique() if 'income' in df.columns else ['<25K']
-    monthly_spendings = df['monthly_spending'].unique() if 'monthly_spending' in df.columns else ['<1K']
-    shopping_styles = df['shopping_style'].unique() if 'shopping_style' in df.columns else ['Budget']
-    sustainability_levels = df['sustainability'].unique() if 'sustainability' in df.columns else ['Low']
-    artisan_supports = df['artisan_support'].unique() if 'artisan_support' in df.columns else ['Low']
+    # Get available categories dynamically
+    age_groups = df['age_group'].unique()
+    genders = df['gender'].unique()
+    locations = df['location'].unique()
+    income_levels = df['income'].unique()
+    monthly_spendings = df['monthly_spending'].unique()
+    shopping_styles = df['shopping_style'].unique()
+    sustainability_levels = df['sustainability'].unique()
+    artisan_supports = df['artisan_support'].unique()
 
     col1, col2, col3 = st.columns(3)
     
@@ -1238,31 +1127,27 @@ def dynamic_pricing_tab(df):
         features_wanted = st.slider("Number of Features Wanted", 1, 8, 4)
     
     # Pricing strategy options
-    st.subheader("🎯 Pricing Strategy")
+    st.markdown("### 🎯 Pricing Strategy")
     col1, col2 = st.columns(2)
     
     with col1:
-        base_price = st.number_input("Base Product Price (₹)", 1000, 50000, 5000, 500)
+        base_price = st.number_input("Base Product Price ($)", 10.0, 500.0, 50.0, 5.0)
         markup_strategy = st.selectbox("Markup Strategy",
-                                      ['Conservative (10-20%)', 'Moderate (20-35%)', 
-                                       'Aggressive (35-50%)', 'Premium (50-75%)'])
+                                       ['Conservative (10-20%)', 'Moderate (20-35%)', 
+                                        'Aggressive (35-50%)', 'Premium (50-75%)'])
     
     with col2:
         demand_factor = st.slider("Demand Factor", 0.5, 2.0, 1.0, 0.1,
-                                 help="Adjust based on inventory and demand (>1 for high demand)")
+                                  help="Adjust based on inventory and demand (>1 for high demand)")
         loyalty_discount = st.slider("Loyalty Discount (%)", 0, 30, 0, 5,
-                                    help="Discount for returning customers")
+                                     help="Discount for returning customers")
     
     if st.button("💡 Calculate Optimal Price", type="primary"):
         # Prepare input data
         input_data = pd.DataFrame({
-            'age_group': [age_group],
-            'gender': [gender],
-            'location': [location],
-            'income': [income],
-            'monthly_spending': [monthly_spending],
-            'sustainability': [sustainability],
-            'artisan_support': [artisan_support],
+            'age_group': [age_group], 'gender': [gender], 'location': [location],
+            'income': [income], 'monthly_spending': [monthly_spending],
+            'sustainability': [sustainability], 'artisan_support': [artisan_support],
             'shopping_style': [shopping_style],
             'categories_interested': [categories_interested],
             'features_wanted': [features_wanted]
@@ -1270,47 +1155,33 @@ def dynamic_pricing_tab(df):
         
         # Encode input
         try:
-            for col in label_encoders.keys():
+            for col, le in label_encoders.items():
                 if col in input_data.columns:
-                    # Handle unseen labels: use a try/except or a safe transform
-                    try:
-                        input_data[f'{col}_encoded'] = label_encoders[col].transform(input_data[col])
-                    except ValueError:
-                        input_data[f'{col}_encoded'] = 0 # Default to 0 for unknown categories
-        
-            # Prepare feature vector
-            input_features = []
-            for col in feature_cols:
-                if col in input_data.columns:
-                    input_features.append(input_data[col].values[0])
-                elif col.replace('_encoded', '') in input_data.columns:
-                    base_col = col.replace('_encoded', '')
-                    input_features.append(input_data[f'{base_col}_encoded'].values[0])
+                    val = input_data[col].values[0]
+                    if val in le.classes_:
+                        input_data[f'{col}_encoded'] = le.transform(input_data[col])
+                    else:
+                        # Handle unseen label - use the most frequent (0)
+                        st.warning(f"Unseen label '{val}' for {col}. Using default.")
+                        input_data[f'{col}_encoded'] = 0 
             
-            input_array = np.array(input_features).reshape(1, -1)
-            input_scaled = scaler.transform(input_array)
+            # Prepare feature vector in correct order
+            input_vector = input_data[feature_cols]
+            input_scaled = scaler.transform(input_vector)
             
             # Predict willingness to pay
             predicted_wtp = model.predict(input_scaled)[0]
             
-            # Calculate confidence interval (using prediction variance for tree-based models)
-            predictions = np.array([tree.predict(input_scaled)[0] for tree in model.estimators_])
-            ci_lower = np.percentile(predictions, 5)
-            ci_upper = np.percentile(predictions, 95)
+            # Simple conversion from normalized WTP back to a price
+            # This logic assumes the original WTP scale (0-~3.5)
+            # We will map this to a dollar amount, e.g., max 3.5 = $200
+            # This is an estimation!
+            predicted_max_price = max(10, predicted_wtp * 50) # Example scaling
         
         except Exception as e:
             st.error(f"Error during input processing or prediction. Details: {e}")
             return
 
-        # Convert WTP to price range (simplified mapping)
-        wtp_mapping = {
-            0: 500, 1: 1500, 2: 3000, 3: 5000, 4: 7500, 5: 12500, 6: 17500, 7: 25000
-        }
-        
-        predicted_max_price = wtp_mapping.get(int(np.round(predicted_wtp)), 5000)
-        ci_lower_price = wtp_mapping.get(int(np.round(ci_lower)), 3000)
-        ci_upper_price = wtp_mapping.get(int(np.round(ci_upper)), 7000)
-        
         # Apply markup strategy
         if 'Conservative' in markup_strategy:
             markup_range = (0.10, 0.20)
@@ -1318,16 +1189,12 @@ def dynamic_pricing_tab(df):
             markup_range = (0.20, 0.35)
         elif 'Aggressive' in markup_strategy:
             markup_range = (0.35, 0.50)
-        else:  # Premium
+        else: # Premium
             markup_range = (0.50, 0.75)
         
         # Calculate recommended price
         optimal_price = base_price * (1 + np.mean(markup_range))
-        
-        # Adjust for demand
         optimal_price *= demand_factor
-        
-        # Apply loyalty discount
         final_price = optimal_price * (1 - loyalty_discount / 100)
         
         # Ensure price doesn't exceed willingness to pay
@@ -1336,317 +1203,250 @@ def dynamic_pricing_tab(df):
         # Display results
         st.success("✅ Pricing Calculation Complete!")
         
-        # Metrics display
-        col1, col2, col3, col4 = st.columns(4)
-        
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Predicted WTP", f"₹{predicted_max_price:,.0f}",
-                     help="Maximum price customer is likely to pay")
+            st.metric("Predicted Max WTP", f"${predicted_max_price:,.2f}",
+                      help="Estimated max price customer is willing to pay")
         with col2:
-            st.metric("Recommended Price", f"₹{final_price:,.0f}",
-                     delta=f"{((final_price - base_price) / base_price * 100):.1f}%")
+            st.metric("Base Price", f"${base_price:,.2f}")
         with col3:
-            st.metric("Profit Margin", f"{((final_price - base_price) / final_price * 100):.1f}%")
-        with col4:
-            st.metric("Conversion Probability", 
-                     f"{(1 - (final_price / predicted_max_price)) * 100:.0f}%",
-                     help="Likelihood of customer accepting this price")
-        
-        # Detailed analysis
-        st.subheader("📊 Pricing Analysis")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Price range visualization
-            st.markdown("**Price Range Analysis**")
-            
-            fig = go.Figure()
-            
-            # Add range
-            fig.add_trace(go.Scatter(
-                x=[ci_lower_price, predicted_max_price, ci_upper_price],
-                y=['WTP Range', 'WTP Range', 'WTP Range'],
-                mode='markers',
-                marker=dict(size=[20, 30, 20], color=['lightblue', 'blue', 'lightblue']),
-                name='WTP Range'
-            ))
-            
-            # Add base price
-            fig.add_trace(go.Scatter(
-                x=[base_price],
-                y=['Reference'],
-                mode='markers',
-                marker=dict(size=25, color='orange', symbol='diamond'),
-                name='Base Price'
-            ))
-            
-            # Add recommended price
-            fig.add_trace(go.Scatter(
-                x=[final_price],
-                y=['Recommended'],
-                mode='markers',
-                marker=dict(size=25, color='green', symbol='star'),
-                name='Recommended Price'
-            ))
-            
-            fig.update_layout(
-                title='Price Positioning',
-                xaxis_title='Price (₹)',
-                height=300,
-                showlegend=True
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Price sensitivity
-            st.markdown("**Price Sensitivity Analysis**")
-            
-            price_points = np.linspace(base_price * 0.8, predicted_max_price * 1.2, 20)
-            conversion_probs = [max(0, min(100, (1 - (p / predicted_max_price)) * 100)) 
-                              for p in price_points]
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=price_points, y=conversion_probs, mode='lines',
-                                   line=dict(color='blue', width=2)))
-            fig.add_vline(x=final_price, line_dash="dash", line_color="green",
-                         annotation_text=f"Recommended: ₹{final_price:,.0f}")
-            fig.update_layout(
-                title='Estimated Conversion Probability vs Price',
-                xaxis_title='Price (₹)',
-                yaxis_title='Conversion Probability (%)',
-                height=300
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Recommendations
-        st.subheader("💡 Pricing Recommendations")
-        
-        recommendations = []
-        
-        if final_price < base_price * 1.1:
-            recommendations.append("⚠️ **Low margin** - Consider increasing base price or markup")
-        
-        if predicted_max_price > final_price * 1.5:
-            recommendations.append("✅ **Good margin opportunity** - Customer has high willingness to pay")
-        
-        if demand_factor > 1.3:
-            recommendations.append("📈 **High demand** - Price premium is justified")
-        
-        if sustainability in ['High', 'Very High'] and artisan_support in ['High', 'Very High']:
-            recommendations.append("🌿 **Value-conscious customer** - Emphasize sustainability & artisan story")
-        
-        if shopping_style == 'Luxury':
-            recommendations.append("💎 **Luxury customer** - Premium pricing and exclusive experience recommended")
-        
-        if income in ['>150K', '100-150K'] and predicted_max_price > 15000:
-            recommendations.append("💰 **High-value customer** - Consider VIP treatment and personalized service")
-        
-        for rec in recommendations:
-            st.markdown(rec)
-        
-        # Strategy summary
-        st.subheader("📋 Pricing Strategy Summary")
-        
+            st.metric("Recommended Price", f"${final_price:,.2f}",
+                      delta=f"{((final_price - base_price) / base_price * 100):.1f}% vs Base")
+
+        st.markdown("### 📋 Pricing Strategy Summary")
         strategy_data = {
             'Component': ['Base Price', 'Markup', 'Demand Adjustment', 'Loyalty Discount', 
-                         'Final Price', 'Max WTP', 'Safety Margin'],
+                          'Final Price', 'Max WTP', 'Safety Margin'],
             'Value': [
-                f"₹{base_price:,.0f}",
+                f"${base_price:,.2f}",
                 f"+{np.mean(markup_range)*100:.0f}%",
                 f"×{demand_factor:.1f}",
                 f"-{loyalty_discount:.0f}%",
-                f"₹{final_price:,.0f}",
-                f"₹{predicted_max_price:,.0f}",
-                f"₹{(predicted_max_price - final_price):,.0f} ({((predicted_max_price - final_price) / predicted_max_price * 100):.1f}%)"
+                f"${final_price:,.2f}",
+                f"${predicted_max_price:,.2f}",
+                f"${(predicted_max_price - final_price):,.2f}"
             ]
         }
-        
         st.table(pd.DataFrame(strategy_data))
-        
-        # Download pricing report
-        st.subheader("💾 Download Pricing Report")
-        
-        report_data = {
-            'Customer Profile': {
-                'Age Group': age_group,
-                'Gender': gender,
-                'Location': location,
-                'Income': income,
-                'Monthly Spending': monthly_spending,
-                'Shopping Style': shopping_style,
-                'Sustainability': sustainability,
-                'Artisan Support': artisan_support
-            },
-            'Pricing Details': {
-                'Base Price': base_price,
-                'Recommended Price': round(final_price, 2),
-                'Max WTP': predicted_max_price,
-                'Profit Margin %': round((final_price - base_price) / final_price * 100, 2),
-                'Conversion Probability %': round((1 - (final_price / predicted_max_price)) * 100, 2)
-            }
-        }
-        
-        report_df = pd.DataFrame([
-            {'Category': cat, 'Metric': k, 'Value': v}
-            for cat, items in report_data.items()
-            for k, v in items.items()
-        ])
-        
-        csv = convert_df_to_csv(report_df)
-        st.download_button("📥 Download Pricing Report", csv,
-                         "pricing_report.csv", "text/csv")
 
-# =============================================================================
+# ============================================================================
+# PAGE 8: BUSINESS DASHBOARD (New)
+# ============================================================================
+
+def page_dashboard():
+    st.markdown('<h2 class="sub-header">📈 Business Dashboard</h2>', 
+                unsafe_allow_html=True)
+    
+    if st.session_state.df_processed is None:
+        st.warning("⚠️ Please load and process data from the 'Home' page first.")
+        return
+
+    df = st.session_state.df
+    df_processed = st.session_state.df_processed
+
+    # KPIs
+    st.markdown("### 📊 Key Performance Indicators")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Customers", len(df))
+    with col2:
+        avg_spending = df_processed['monthly_spending_numeric'].mean()
+        st.metric("Avg. Monthly Spending", f"${avg_spending:,.2f}")
+    with col3:
+        top_location = df['location'].mode()[0]
+        st.metric("Top Location", top_location)
+    with col4:
+        top_age_group = df['age_group'].mode()[0]
+        st.metric("Top Age Group", top_age_group)
+        
+    st.markdown("---")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 🛍️ Spending by Shopping Style")
+        spending_by_style = df_processed.groupby('shopping_style')['monthly_spending_numeric'].mean().sort_values()
+        fig = px.bar(spending_by_style, x=spending_by_style.values, y=spending_by_style.index,
+                     orientation='h', labels={'x': 'Avg. Monthly Spending ($)', 'y': 'Shopping Style'},
+                     title="Avg. Monthly Spending by Shopping Style")
+        st.plotly_chart(fig, use_container_width=True)
+        
+    with col2:
+        st.markdown("### 🌍 Spending by Location")
+        spending_by_loc = df_processed.groupby('location')['monthly_spending_numeric'].mean().sort_values()
+        fig = px.bar(spending_by_loc, x=spending_by_loc.values, y=spending_by_loc.index,
+                     orientation='h', labels={'x': 'Avg. Monthly Spending ($)', 'y': 'Location'},
+                     title="Avg. Monthly Spending by Location")
+        st.plotly_chart(fig, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### 🌳 Sustainability vs. Spending")
+        fig = px.box(df_processed, x='sustainability', y='monthly_spending_numeric',
+                     title="Monthly Spending by Sustainability Interest",
+                     labels={'sustainability': 'Sustainability Interest', 'monthly_spending_numeric': 'Monthly Spending ($)'},
+                     color='sustainability')
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        st.markdown("### 🤝 Artisan Support vs. Spending")
+        fig = px.box(df_processed, x='artisan_support', y='monthly_spending_numeric',
+                     title="Monthly Spending by Artisan Support Interest",
+                     labels={'artisan_support': 'Artisan Support Interest', 'monthly_spending_numeric': 'Monthly Spending ($)'},
+                     color='artisan_support')
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================================
+# PAGE 9: EXPORT REPORTS (New)
+# ============================================================================
+
+def page_export():
+    st.markdown('<h2 class="sub-header">📥 Export Reports & Data</h2>', 
+                unsafe_allow_html=True)
+    
+    if st.session_state.df is None:
+        st.warning("⚠️ No data loaded to export.")
+        return
+        
+    st.markdown("### 💾 Download Data")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Export raw data
+        csv_raw = convert_df_to_csv(st.session_state.df)
+        st.download_button(
+            label="📥 Download Raw Data (CSV)",
+            data=csv_raw,
+            file_name=f"shopizz_raw_data_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+    
+    with col2:
+        # Export processed data
+        if st.session_state.df_processed is not None:
+            csv_processed = convert_df_to_csv(st.session_state.df_processed)
+            st.download_button(
+                label="📥 Download Processed Data (CSV)",
+                data=csv_processed,
+                file_name=f"shopizz_processed_data_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("Process data on the 'Home' page to enable this download.")
+
+    st.markdown("---")
+    st.markdown("### 📊 Download Analysis Results")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if 'regression' in st.session_state.analysis_results:
+            csv_reg = convert_df_to_csv(st.session_state.analysis_results['regression'])
+            st.download_button(
+                label="📥 Download Regression Metrics (CSV)",
+                data=csv_reg,
+                file_name=f"regression_metrics_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("Run Regression analysis to enable.")
+
+    with col2:
+        if 'classification' in st.session_state.analysis_results:
+            csv_clf = convert_df_to_csv(st.session_state.analysis_results['classification'])
+            st.download_button(
+                label="📥 Download Classification Metrics (CSV)",
+                data=csv_clf,
+                file_name=f"classification_metrics_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("Run Classification analysis to enable.")
+
+    with col3:
+        if 'association_rules' in st.session_state.analysis_results:
+            csv_assoc = convert_df_to_csv(st.session_state.analysis_results['association_rules'])
+            st.download_button(
+                label="📥 Download Association Rules (CSV)",
+                data=csv_assoc,
+                file_name=f"association_rules_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("Run Association Rules to enable.")
+
+# ============================================================================
 # MAIN APP
-# =============================================================================
+# ============================================================================
 
 def main():
-    # Initialize session state for DataFrame if not present
-    if 'df' not in st.session_state:
-        st.session_state['df'] = None
-
+    # Title
+    st.markdown('<h1 class="main-header">🛍️ Shopizz.com Analytics Dashboard</h1>', 
+                unsafe_allow_html=True)
+    
     # Sidebar
     with st.sidebar:
-        st.image("https://img.icons8.com/fluency/96/000000/shop.png", width=80)
-        st.title("Shopizz Analytics")
-        st.markdown("---")
+        st.image("https://img.icons8.com/fluency/96/000000/shop.png", width=100)
+        st.title("📊 Navigation")
         
-        st.subheader("📊 Data Management")
-        
-        data_source = st.radio(
-            "Data Source",
-            ["Use Sample Data", "Upload CSV", "Load from GitHub"]
+        page = st.radio(
+            "Select Analysis Module:",
+            ["🏠 Home & Data Management",
+             "📊 Exploratory Data Analysis",
+             "🔗 Association Rule Mining",
+             "🎯 Classification Analysis",
+             "👥 Customer Clustering",
+             "📈 Regression Analysis (WTP)",
+             "💰 Dynamic Pricing Engine",
+             "📈 Business Dashboard",
+             "📥 Export Reports"],
+            label_visibility="collapsed"
         )
         
-        df = None
-        
-        if data_source == "Use Sample Data":
-            n_samples = st.slider("Number of samples", 100, 2000, 1000, 100)
-            if st.button("Generate Sample Data"):
-                # Clear cache and generate new data to ensure clean state
-                generate_synthetic_data.clear()
-                df = generate_synthetic_data(n_samples)
-                st.session_state['df'] = df
-                st.success(f"✅ Generated {len(df)} samples. Please proceed to the main tabs.")
-                st.rerun() # Force a clean rerun after data generation
-        
-        elif data_source == "Upload CSV":
-            uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
-            if uploaded_file is not None:
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    st.session_state['df'] = df
-                    st.success(f"✅ Loaded {len(df)} rows. Please verify all required columns are present.")
-                    st.rerun() # Force a clean rerun after data loading
-                except Exception as e:
-                    st.error(f"Error reading CSV file: {e}")
-                    st.session_state['df'] = None
-        
-        else:  # GitHub
-            github_url = st.text_input(
-                "GitHub Raw URL",
-                placeholder="https://raw.githubusercontent.com/..."
-            )
-            if st.button("Load from GitHub"):
-                df = load_data_from_github(github_url)
-                if df is not None:
-                    st.session_state['df'] = df
-                    st.success(f"✅ Loaded {len(df)} rows from GitHub")
-                    st.rerun() # Force a clean rerun after data loading
-        
-        # Use existing data if available
-        if 'df' in st.session_state:
-            df = st.session_state['df']
-        
-        if df is not None:
-            st.markdown("---")
-            st.subheader("📈 Data Summary")
-            st.write(f"**Rows:** {len(df)}")
-            st.write(f"**Columns:** {len(df.columns)}")
-            
-            with st.expander("View Data"):
-                st.dataframe(df.head(10))
-            
-            with st.expander("View Columns"):
-                st.dataframe(df.dtypes.rename('DataType'))
-        
         st.markdown("---")
-        st.markdown("### 📖 About")
-        st.info(
-            "Shopizz Analytics Dashboard provides comprehensive ML-powered "
-            "insights for customer behavior analysis, segmentation, and pricing optimization."
-        )
-    
-    # Main content
-    st.title("🛍️ Shopizz.com Analytics Dashboard")
-    st.markdown("Comprehensive ML-powered customer analytics platform")
-    
-    if 'df' not in st.session_state or st.session_state['df'] is None:
-        st.warning("⚠️ Please load data from the sidebar to begin analysis (using **'Generate Sample Data'** is recommended).")
+        st.markdown("### 🎯 Quick Stats")
         
-        # Show welcome screen
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("""
-                ### 🔗 Association Rules
-                Discover shopping patterns and product associations
-            """)
-        
-        with col2:
-            st.markdown("""
-                ### 🎯 Classification
-                Predict customer subscription and behavior
-            """)
-        
-        with col3:
-            st.markdown("""
-                ### 👥 Clustering
-                Segment customers into personas
-            """)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-                ### 📈 Regression
-                Predict willingness to pay
-            """)
-        
-        with col2:
-            st.markdown("""
-                ### 💰 Dynamic Pricing
-                Optimize pricing strategy
-            """)
-        
-        return
+        if 'df' in st.session_state and st.session_state.df is not None:
+            st.metric("Total Records", len(st.session_state.df))
+            st.metric("Total Features", len(st.session_state.df.columns))
+            if 'df_processed' in st.session_state and st.session_state.df_processed is not None:
+                st.metric("Processed Features", len(st.session_state.df_processed.columns))
+        else:
+            st.info("Load data to see stats")
+
+    # Initialize session state
+    if 'df' not in st.session_state:
+        st.session_state.df = None
+    if 'df_processed' not in st.session_state:
+        st.session_state.df_processed = None
+    if 'label_encoders' not in st.session_state:
+        st.session_state.label_encoders = None
+    if 'analysis_results' not in st.session_state:
+        st.session_state.analysis_results = {}
     
-    df = st.session_state['df']
-    
-    # Create tabs
-    tabs = st.tabs([
-        "🔗 Association Rules",
-        "🎯 Classification",
-        "👥 Clustering",
-        "📈 Regression",
-        "💰 Dynamic Pricing"
-    ])
-    
-    with tabs[0]:
-        association_rules_tab(df)
-    
-    with tabs[1]:
-        classification_tab(df)
-    
-    with tabs[2]:
-        clustering_tab(df)
-    
-    with tabs[3]:
-        regression_tab(df)
-    
-    with tabs[4]:
-        dynamic_pricing_tab(df)
+    # Route to selected page
+    if page == "🏠 Home & Data Management":
+        page_home()
+    elif page == "📊 Exploratory Data Analysis":
+        page_eda()
+    elif page == "🔗 Association Rule Mining":
+        page_association_rules()
+    elif page == "🎯 Classification Analysis":
+        page_classification()
+    elif page == "👥 Customer Clustering":
+        page_clustering()
+    elif page == "📈 Regression Analysis (WTP)":
+        page_regression()
+    elif page == "💰 Dynamic Pricing Engine":
+        page_dynamic_pricing()
+    elif page == "📈 Business Dashboard":
+        page_dashboard()
+    elif page == "📥 Export Reports":
+        page_export()
 
 if __name__ == "__main__":
     main()
