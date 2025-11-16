@@ -16,7 +16,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ML Libraries
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, Lasso
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingRegressor
@@ -25,14 +25,14 @@ from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, roc_curve, auc,
+    confusion_matrix, classification_report, roc_curve, auc,
     r2_score, mean_squared_error, mean_absolute_error,
     silhouette_score, davies_bouldin_score
 )
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 import networkx as nx
-from scipy import stats
+from scipy import stats # Import required for Q-Q plot in regression (needed for original code functionality)
 
 # Attempt to import XGBoost, handle gracefully if not installed
 try:
@@ -218,7 +218,6 @@ def association_rules_tab(df):
             transactions = []
             for items in df['cart_items']:
                 if pd.notna(items):
-                    # Robustly handle different delimiters if necessary, but pipe is assumed here
                     transactions.append(items.split('|'))
             
             # Encode transactions
@@ -417,7 +416,7 @@ def classification_tab(df):
     available_models = ['Logistic Regression', 'Random Forest', 'SVM']
     if XGBClassifier:
         available_models.append('XGBoost')
-        
+
     models_to_train = st.multiselect(
         "Select Models to Compare",
         available_models,
@@ -485,7 +484,6 @@ def classification_tab(df):
                 
                 # Predict
                 y_pred = model.predict(X_test_scaled)
-                # Need predict_proba for ROC and proper metric calculation
                 y_pred_proba = model.predict_proba(X_test_scaled)
                 
                 # Metrics
@@ -538,20 +536,12 @@ def classification_tab(df):
             with col1:
                 # Confusion Matrix
                 st.subheader("🔢 Confusion Matrix")
-                cm = pd.crosstab(y_test, best_result['y_pred'], rownames=['Actual'], colnames=['Predicted'])
+                cm = confusion_matrix(y_test, best_result['y_pred'])
                 
-                # Use class labels from target_names
-                if target_type.startswith("Multi"):
-                    cm.columns = target_names
-                    cm.index = target_names
-                elif target_type.startswith("Binary"):
-                    cm.columns = target_names
-                    cm.index = target_names
-                    
                 fig = px.imshow(cm, 
                               labels=dict(x="Predicted", y="Actual", color="Count"),
-                              x=cm.columns,
-                              y=cm.index,
+                              x=target_names[:len(np.unique(y_test))],
+                              y=target_names[:len(np.unique(y_test))],
                               color_continuous_scale='Blues',
                               text_auto=True)
                 fig.update_layout(height=500)
@@ -574,7 +564,7 @@ def classification_tab(df):
                                 title='Model Metrics Comparison')
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Feature Importance (for tree-based models)
+            # Feature Importance (for Random Forest)
             importance_model_name = next((m for m in ['Random Forest', 'XGBoost'] if m in results), None)
             if importance_model_name:
                 st.subheader(f"🔍 Feature Importance ({importance_model_name})")
@@ -595,7 +585,6 @@ def classification_tab(df):
                 fig = go.Figure()
                 
                 for model_name, result in results.items():
-                    # Check if y_pred_proba has two columns (required for binary ROC)
                     if result['y_pred_proba'].shape[1] == 2:
                         fpr, tpr, _ = roc_curve(y_test, result['y_pred_proba'][:, 1])
                         roc_auc = auc(fpr, tpr)
@@ -614,14 +603,9 @@ def classification_tab(df):
             
             # Classification Report
             st.subheader("📋 Detailed Classification Report")
-            # Ensure target_names matches the number of unique classes in y_test
-            unique_classes = np.unique(y_test)
-            final_target_names = [target_names[c] for c in unique_classes]
-            
-            from sklearn.metrics import classification_report
             report = classification_report(y_test, best_result['y_pred'], 
-                                         target_names=final_target_names,
-                                         output_dict=True, zero_division=0)
+                                         target_names=target_names[:len(np.unique(y_test))],
+                                         output_dict=True)
             report_df = pd.DataFrame(report).transpose()
             st.dataframe(report_df.style.background_gradient(cmap='RdYlGn', subset=['f1-score']),
                         use_container_width=True)
@@ -657,13 +641,9 @@ def clustering_tab(df):
 
     # Feature selection
     st.subheader("📊 Select Features for Clustering")
-    
-    # Use encoded features for numeric properties where possible
-    feature_options = [
-        'age_group', 'gender', 'location', 'income', 'monthly_spending',
-        'sustainability', 'artisan_support', 'shopping_style',
-        'categories_interested', 'features_wanted'
-    ]
+    feature_options = ['age_group', 'gender', 'location', 'income', 'monthly_spending',
+                      'sustainability', 'artisan_support', 'shopping_style',
+                      'categories_interested', 'features_wanted']
     
     selected_features = st.multiselect(
         "Select features",
@@ -680,7 +660,7 @@ def clustering_tab(df):
     with col1:
         algorithm = st.selectbox("Clustering Algorithm", 
                                 ['K-Means', 'Hierarchical', 'DBSCAN'])
-    
+        
     # Initialize default values outside the button block for robustness
     n_clusters = 4 
     eps = 0.5      
@@ -697,12 +677,14 @@ def clustering_tab(df):
         with st.spinner("Performing clustering analysis..."):
             
             # Select features (using encoded/numeric columns)
-            feature_cols = [f'{f}_encoded' if f in df_processed.columns and f not in ['categories_interested', 'features_wanted']
+            feature_cols = [f'{f}_encoded' if f in ['age_group', 'gender', 'location', 'income',
+                                                     'monthly_spending', 'sustainability',
+                                                     'artisan_support', 'shopping_style'] 
                           else f for f in selected_features]
             
             # Filter df_processed to ensure all columns exist
             feature_cols = [col for col in feature_cols if col in df_processed.columns]
-            
+
             # Validation to prevent InvalidParameterError
             if not feature_cols:
                 st.error("🚨 Selected features could not be found or encoded in the current DataFrame. Please ensure the data includes the selected columns or use the Sample Data.")
@@ -731,16 +713,13 @@ def clustering_tab(df):
             else:  # DBSCAN
                 model = DBSCAN(eps=eps, min_samples=min_samples)
                 labels = model.fit_predict(X_scaled)
-            
-            # Determine actual number of clusters
-            unique_labels = set(labels)
-            n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
             
             # Add labels to dataframe
             df_processed['Cluster'] = labels
             
             # Metrics
-            if n_clusters > 1:
+            if len(set(labels)) > 1:
                 silhouette = silhouette_score(X_scaled, labels)
                 davies_bouldin = davies_bouldin_score(X_scaled, labels)
             else:
@@ -778,7 +757,7 @@ def clustering_tab(df):
             
             # Calculate cluster statistics
             cluster_profiles = []
-            for cluster_id in sorted(unique_labels):
+            for cluster_id in sorted(set(labels)):
                 if cluster_id == -1:
                     continue
                 
@@ -789,13 +768,13 @@ def clustering_tab(df):
                     'Size %': f"{len(cluster_data)/len(df)*100:.1f}%"
                 }
                 
-                # Add feature statistics (using original, un-encoded columns)
+                # Add feature statistics
                 for feature in selected_features:
                     if feature in ['categories_interested', 'features_wanted']:
                         profile[feature] = f"{cluster_data[feature].mean():.1f}"
                     else:
                         mode_val = cluster_data[feature].mode()
-                        profile[feature] = mode_val[0] if not mode_val.empty else 'N/A'
+                        profile[feature] = mode_val[0] if len(mode_val) > 0 else 'N/A'
                 
                 cluster_profiles.append(profile)
             
@@ -808,11 +787,10 @@ def clustering_tab(df):
             with col1:
                 # Elbow curve (for K-Means)
                 if algorithm == 'K-Means':
-                    st.subheader("📉 Elbow Curve (K-Means)")
+                    st.subheader("📉 Elbow Curve")
                     inertias = []
                     K_range = range(2, 11)
                     
-                    # Ensure X_scaled has enough samples/features
                     if X_scaled.shape[0] >= 11: 
                         for k in K_range:
                             kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
@@ -825,32 +803,28 @@ def clustering_tab(df):
                                     annotation_text=f"Selected: {n_clusters}")
                         fig.update_layout(
                             title='Elbow Method',
-                            xaxis_title='Number of Clusters (K)',
+                            xaxis_title='Number of Clusters',
                             yaxis_title='Inertia',
                             height=400
                         )
                         st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("Not enough data points to compute a meaningful Elbow Curve (K-Means).")
-
+                
                 # Silhouette scores
-                if algorithm != 'DBSCAN' and X_scaled.shape[0] >= 11: # Also avoid for DBSCAN
-                    st.subheader("📊 Silhouette Analysis")
-                    silhouette_scores = []
-                    K_range = range(2, 11)
+                st.subheader("📊 Silhouette Analysis")
+                silhouette_scores = []
+                K_range = range(2, 11)
+                
+                if X_scaled.shape[0] >= 11:
                     for k in K_range:
                         if algorithm == 'K-Means':
                             model_temp = KMeans(n_clusters=k, random_state=42, n_init=10)
                         else:
                             model_temp = AgglomerativeClustering(n_clusters=k)
                         labels_temp = model_temp.fit_predict(X_scaled)
-                        
-                        # Only calculate if > 1 unique label is found
-                        if len(set(labels_temp)) > 1:
-                            score = silhouette_score(X_scaled, labels_temp)
-                            silhouette_scores.append(score)
-                        else:
-                            silhouette_scores.append(0) # or NaN
+                        score = silhouette_score(X_scaled, labels_temp)
+                        silhouette_scores.append(score)
                     
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=list(K_range), y=silhouette_scores, 
@@ -859,13 +833,14 @@ def clustering_tab(df):
                                 annotation_text=f"Selected: {n_clusters}")
                     fig.update_layout(
                         title='Silhouette Score by Number of Clusters',
-                        xaxis_title='Number of Clusters (K)',
+                        xaxis_title='Number of Clusters',
                         yaxis_title='Silhouette Score',
                         height=400
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                elif X_scaled.shape[0] < 11:
+                else:
                      st.info("Not enough data points for detailed Silhouette Analysis.")
+
             
             with col2:
                 # PCA visualization
@@ -890,7 +865,7 @@ def clustering_tab(df):
                     st.info("At least 2 features are required for PCA Visualization.")
                 
                 # 3D PCA (if enough components)
-                if X_scaled.shape[1] >= 3:
+                if len(selected_features) >= 3 and X_scaled.shape[1] >= 3:
                     st.subheader("🎯 3D PCA Visualization")
                     pca_3d = PCA(n_components=3)
                     X_pca_3d = pca_3d.fit_transform(X_scaled)
@@ -907,7 +882,9 @@ def clustering_tab(df):
                                       color_discrete_sequence=px.colors.qualitative.Set3)
                     fig.update_layout(height=450)
                     st.plotly_chart(fig, use_container_width=True)
-
+                elif len(selected_features) >= 3:
+                    st.info("Not enough scaled features available for 3D PCA visualization.")
+            
             # Download results
             st.subheader("💾 Download Results")
             results_df = df.copy()
@@ -934,13 +911,13 @@ def clustering_tab(df):
 
 def regression_tab(df):
     st.header("📈 Regression Analysis")
-    st.markdown("Predict customer willingness to pay (numeric)")
-    
+    st.markdown("Predict customer willingness to pay")
+
     # Validation Check
     if 'willingness_to_pay_numeric' not in df.columns:
         st.error("⚠️ The DataFrame is missing the required target column **'willingness_to_pay_numeric'** for Regression Analysis. Please use the Sample Data or upload a file with this column.")
         return
-        
+    
     # Model selection
     st.subheader("🤖 Model Selection")
     
@@ -1019,7 +996,7 @@ def regression_tab(df):
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
                 mae = mean_absolute_error(y_test, y_pred_test)
                 
-                # Adjusted R² - Check if n > p + 1
+                # Adjusted R²
                 n = len(y_test)
                 p = X_test.shape[1]
                 if n > p + 1:
@@ -1057,7 +1034,7 @@ def regression_tab(df):
             }).sort_values('Test R²', ascending=False)
             
             st.dataframe(
-                metrics_df.style.background_gradient(cmap='RdYlGn', subset=['Test R%', 'Adjusted R²'])
+                metrics_df.style.background_gradient(cmap='RdYlGn', subset=['Test R²', 'Adjusted R²'])
                                 .background_gradient(cmap='RdYlGn_r', subset=['RMSE', 'MAE'], axis=0, vmin=metrics_df[['RMSE', 'MAE']].min().min(), vmax=metrics_df[['RMSE', 'MAE']].max().max()),
                 use_container_width=True
             )
@@ -1114,13 +1091,12 @@ def regression_tab(df):
                 st.plotly_chart(fig, use_container_width=True)
             
             # Metrics comparison chart
-            st.subheader("📊 R² Metrics Comparison Across Models")
+            st.subheader("📊 Metrics Comparison Across Models")
             
             fig = go.Figure()
             fig.add_trace(go.Bar(name='Test R²', x=list(results.keys()),
                                y=[r['test_r2'] for r in results.values()],
                                marker_color='lightblue'))
-            # Filter out NaN Adjusted R² values for plotting
             valid_adj_r2 = [r['adjusted_r2'] if not pd.isna(r['adjusted_r2']) else 0 for r in results.values()]
 
             fig.add_trace(go.Bar(name='Adjusted R²', x=list(results.keys()),
@@ -1173,23 +1149,23 @@ def regression_tab(df):
             predictions_df = pd.DataFrame({
                 'Actual': y_test,
                 'Predicted': best_result['y_pred_test'],
-                'Residual': residuals.values # Use .values to handle Series/Array
+                'Residual': residuals
             })
             
             col1, col2, col3 = st.columns(3)
             with col1:
                 csv = convert_df_to_csv(predictions_df)
                 st.download_button("📥 Download Predictions", csv,
-                                 "regression_predictions.csv", "text/csv")
+                                 "predictions.csv", "text/csv")
             with col2:
                 csv_metrics = convert_df_to_csv(metrics_df)
                 st.download_button("📥 Download Metrics", csv_metrics,
-                                 "regression_model_metrics.csv", "text/csv")
+                                 "model_metrics.csv", "text/csv")
             with col3:
                 if importance_model_name:
                     csv_importance = convert_df_to_csv(feature_importance)
                     st.download_button("📥 Download Feature Importance", csv_importance,
-                                     "regression_feature_importance.csv", "text/csv")
+                                     "feature_importance.csv", "text/csv")
 
 # =============================================================================
 # TAB 5: DYNAMIC PRICING
@@ -1198,14 +1174,13 @@ def regression_tab(df):
 def dynamic_pricing_tab(df):
     st.header("💰 Dynamic Pricing Engine")
     st.markdown("Get personalized price recommendations based on customer profile")
-    
+
     # Validation Check
-    required_cols = ['willingness_to_pay_numeric']
-    if not all(col in df.columns for col in required_cols):
-        st.error("⚠️ The DataFrame is missing required columns for Dynamic Pricing. Please use the Sample Data or upload a file with the 'willingness_to_pay_numeric' column.")
+    if 'willingness_to_pay_numeric' not in df.columns:
+        st.error("⚠️ The DataFrame is missing the required column **'willingness_to_pay_numeric'** for Dynamic Pricing. Please use the Sample Data or upload a file with this column.")
         return
     
-    st.info("ℹ️ This tool uses a Random Forest regression model trained on the data to predict willingness to pay and suggests optimal pricing.")
+    st.info("ℹ️ This tool uses the regression model to predict willingness to pay and suggests optimal pricing.")
     
     # Train a quick model for pricing
     with st.spinner("Loading pricing model..."):
@@ -1214,59 +1189,51 @@ def dynamic_pricing_tab(df):
             feature_cols = get_feature_columns(df_processed)
             X = df_processed[feature_cols]
             y = df_processed['willingness_to_pay_numeric']
-            
+
             if X.empty or X.shape[0] < 2:
                 st.error("🚨 Cannot train pricing model: Feature matrix is empty or too small.")
                 return
-
+            
             scaler = StandardScaler()
-            X = scaler.fit_transform(X) # X_scaled in this local scope
+            X_scaled = scaler.fit_transform(X)
             
             # Train Random Forest (best performing model typically)
             model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X, y)
+            model.fit(X_scaled, y)
         except Exception as e:
             st.error(f"Failed to train the pricing model. Ensure data integrity. Error: {e}")
             return
-            
+    
     st.success("✅ Pricing model loaded!")
     
     # Customer input form
     st.subheader("👤 Customer Profile Input")
     
-    # Get available categories from the original data columns for selectboxes
-    age_groups = df['age_group'].unique() if 'age_group' in df.columns else []
-    genders = df['gender'].unique() if 'gender' in df.columns else []
-    locations = df['location'].unique() if 'location' in df.columns else []
-    income_levels = df['income'].unique() if 'income' in df.columns else []
-    monthly_spendings = df['monthly_spending'].unique() if 'monthly_spending' in df.columns else []
-    shopping_styles = df['shopping_style'].unique() if 'shopping_style' in df.columns else []
-    sustainability_levels = df['sustainability'].unique() if 'sustainability' in df.columns else []
-    artisan_supports = df['artisan_support'].unique() if 'artisan_support' in df.columns else []
-    
-    # Ensure all are sorted and in list form for clean display
-    for var in [age_groups, genders, locations, income_levels, monthly_spendings, shopping_styles, sustainability_levels, artisan_supports]:
-        if 'numpy' in str(type(var)): # Check for numpy array
-             var.sort()
-        elif hasattr(var, 'sort'): # Check for list
-            var.sort()
+    # Get available categories dynamically (safer for uploaded data)
+    age_groups = df['age_group'].unique() if 'age_group' in df.columns else ['18-24']
+    genders = df['gender'].unique() if 'gender' in df.columns else ['Male']
+    locations = df['location'].unique() if 'location' in df.columns else ['Metro']
+    income_levels = df['income'].unique() if 'income' in df.columns else ['<25K']
+    monthly_spendings = df['monthly_spending'].unique() if 'monthly_spending' in df.columns else ['<1K']
+    shopping_styles = df['shopping_style'].unique() if 'shopping_style' in df.columns else ['Budget']
+    sustainability_levels = df['sustainability'].unique() if 'sustainability' in df.columns else ['Low']
+    artisan_supports = df['artisan_support'].unique() if 'artisan_support' in df.columns else ['Low']
 
     col1, col2, col3 = st.columns(3)
     
-    # Use default values based on synthetic data if columns aren't found
     with col1:
-        age_group = st.selectbox("Age Group", age_groups) if age_groups.any() else '18-24'
-        gender = st.selectbox("Gender", genders) if genders.any() else 'Male'
-        location = st.selectbox("Location", locations) if locations.any() else 'Metro'
+        age_group = st.selectbox("Age Group", age_groups)
+        gender = st.selectbox("Gender", genders)
+        location = st.selectbox("Location", locations)
     
     with col2:
-        income = st.selectbox("Income Level", income_levels) if income_levels.any() else '<25K'
-        monthly_spending = st.selectbox("Current Monthly Spending", monthly_spendings) if monthly_spendings.any() else '<1K'
-        shopping_style = st.selectbox("Shopping Style", shopping_styles) if shopping_styles.any() else 'Budget'
+        income = st.selectbox("Income Level", income_levels)
+        monthly_spending = st.selectbox("Current Monthly Spending", monthly_spendings)
+        shopping_style = st.selectbox("Shopping Style", shopping_styles)
     
     with col3:
-        sustainability = st.selectbox("Sustainability Consciousness", sustainability_levels) if sustainability_levels.any() else 'Low'
-        artisan_support = st.selectbox("Artisan Support Interest", artisan_supports) if artisan_supports.any() else 'Low'
+        sustainability = st.selectbox("Sustainability Consciousness", sustainability_levels)
+        artisan_support = st.selectbox("Artisan Support Interest", artisan_supports)
         categories_interested = st.slider("Number of Categories Interested", 1, 6, 3)
         features_wanted = st.slider("Number of Features Wanted", 1, 8, 4)
     
@@ -1305,53 +1272,44 @@ def dynamic_pricing_tab(df):
         try:
             for col in label_encoders.keys():
                 if col in input_data.columns:
-                    # Handle unseen labels by setting to a default value (e.g., 0)
+                    # Handle unseen labels: use a try/except or a safe transform
                     try:
                         input_data[f'{col}_encoded'] = label_encoders[col].transform(input_data[col])
                     except ValueError:
-                        st.warning(f"Unseen label in column '{col}'. Setting encoded value to 0.")
-                        input_data[f'{col}_encoded'] = 0
-            
+                        input_data[f'{col}_encoded'] = 0 # Default to 0 for unknown categories
+        
             # Prepare feature vector
             input_features = []
             for col in feature_cols:
                 if col in input_data.columns:
                     input_features.append(input_data[col].values[0])
                 elif col.replace('_encoded', '') in input_data.columns:
-                    # For original non-encoded numeric features
-                    input_features.append(input_data[col.replace('_encoded', '')].values[0])
-                else:
-                    st.error(f"Missing required feature column: {col}")
-                    return
-
+                    base_col = col.replace('_encoded', '')
+                    input_features.append(input_data[f'{base_col}_encoded'].values[0])
+            
             input_array = np.array(input_features).reshape(1, -1)
             input_scaled = scaler.transform(input_array)
             
             # Predict willingness to pay
-            predicted_wtp_raw = model.predict(input_scaled)[0]
+            predicted_wtp = model.predict(input_scaled)[0]
             
-            # Calculate confidence interval
+            # Calculate confidence interval (using prediction variance for tree-based models)
             predictions = np.array([tree.predict(input_scaled)[0] for tree in model.estimators_])
-            ci_lower_raw = np.percentile(predictions, 5)
-            ci_upper_raw = np.percentile(predictions, 95)
-            
+            ci_lower = np.percentile(predictions, 5)
+            ci_upper = np.percentile(predictions, 95)
+        
         except Exception as e:
-            st.error(f"Error during prediction or encoding. Check input values. Details: {e}")
+            st.error(f"Error during input processing or prediction. Details: {e}")
             return
 
-        # Simplified WTP to Max Price Mapping (Based on prediction scale)
-        MIN_WTP_PRICE = 1500
-        MAX_WTP_PRICE = 20000
-        MAX_WTP_SCORE = 7 
+        # Convert WTP to price range (simplified mapping)
+        wtp_mapping = {
+            0: 500, 1: 1500, 2: 3000, 3: 5000, 4: 7500, 5: 12500, 6: 17500, 7: 25000
+        }
         
-        def score_to_price(score):
-            score = max(0, min(MAX_WTP_SCORE, score)) # Clamp score between 0 and 7
-            price = MIN_WTP_PRICE + (score / MAX_WTP_SCORE) * (MAX_WTP_PRICE - MIN_WTP_PRICE)
-            return round(price / 100) * 100 # Round to nearest 100 for clean pricing
-        
-        predicted_max_price = score_to_price(predicted_wtp_raw)
-        ci_lower_price = score_to_price(ci_lower_raw)
-        ci_upper_price = score_to_price(ci_upper_raw)
+        predicted_max_price = wtp_mapping.get(int(np.round(predicted_wtp)), 5000)
+        ci_lower_price = wtp_mapping.get(int(np.round(ci_lower)), 3000)
+        ci_upper_price = wtp_mapping.get(int(np.round(ci_upper)), 7000)
         
         # Apply markup strategy
         if 'Conservative' in markup_strategy:
@@ -1372,20 +1330,8 @@ def dynamic_pricing_tab(df):
         # Apply loyalty discount
         final_price = optimal_price * (1 - loyalty_discount / 100)
         
-        # FINAL CONSTRAINT: Ensure final price is BELOW the maximum predicted WTP
-        max_acceptable_price = predicted_max_price
-        
-        # If the calculated final price is much higher than WTP, reduce it.
-        if final_price > max_acceptable_price:
-            final_price = max_acceptable_price * 0.95 # Safety buffer 
-            st.warning(f"Price capped at 95% of predicted Max WTP (₹{max_acceptable_price:,.0f}) to ensure conversion.")
-        
-        # Ensure it's not below the base price (for profit)
-        final_price = max(final_price, base_price * 1.05) # Minimum 5% margin
-        
-        # Conversion Probability Estimate (Simplified)
-        # P = 1 - (Price / Max WTP) -> Clamped between 0 and 1
-        conversion_prob = max(0, min(1, 1 - (final_price / predicted_max_price)))
+        # Ensure price doesn't exceed willingness to pay
+        final_price = min(final_price, predicted_max_price)
         
         # Display results
         st.success("✅ Pricing Calculation Complete!")
@@ -1394,17 +1340,17 @@ def dynamic_pricing_tab(df):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Predicted Max WTP", f"₹{predicted_max_price:,.0f}",
+            st.metric("Predicted WTP", f"₹{predicted_max_price:,.0f}",
                      help="Maximum price customer is likely to pay")
         with col2:
             st.metric("Recommended Price", f"₹{final_price:,.0f}",
-                     delta=f"{((final_price - base_price) / base_price * 100):.1f}% Markup")
+                     delta=f"{((final_price - base_price) / base_price * 100):.1f}%")
         with col3:
             st.metric("Profit Margin", f"{((final_price - base_price) / final_price * 100):.1f}%")
         with col4:
             st.metric("Conversion Probability", 
-                     f"{conversion_prob * 100:.1f}%",
-                     help="Estimated likelihood of customer purchase at this price point.")
+                     f"{(1 - (final_price / predicted_max_price)) * 100:.0f}%",
+                     help="Likelihood of customer accepting this price")
         
         # Detailed analysis
         st.subheader("📊 Pricing Analysis")
@@ -1413,43 +1359,42 @@ def dynamic_pricing_tab(df):
         
         with col1:
             # Price range visualization
-            st.markdown("**Price Positioning**")
+            st.markdown("**Price Range Analysis**")
             
             fig = go.Figure()
             
-            # Add range (Lower CI, WTP, Upper CI)
+            # Add range
             fig.add_trace(go.Scatter(
                 x=[ci_lower_price, predicted_max_price, ci_upper_price],
                 y=['WTP Range', 'WTP Range', 'WTP Range'],
                 mode='markers',
-                marker=dict(size=[15, 25, 15], color=['lightblue', 'blue', 'lightblue']),
-                name='WTP 90% CI'
+                marker=dict(size=[20, 30, 20], color=['lightblue', 'blue', 'lightblue']),
+                name='WTP Range'
             ))
             
             # Add base price
             fig.add_trace(go.Scatter(
                 x=[base_price],
-                y=['Base Price'],
+                y=['Reference'],
                 mode='markers',
-                marker=dict(size=20, color='orange', symbol='diamond'),
+                marker=dict(size=25, color='orange', symbol='diamond'),
                 name='Base Price'
             ))
             
             # Add recommended price
             fig.add_trace(go.Scatter(
                 x=[final_price],
-                y=['Recommended Price'],
+                y=['Recommended'],
                 mode='markers',
-                marker=dict(size=20, color='green', symbol='star'),
+                marker=dict(size=25, color='green', symbol='star'),
                 name='Recommended Price'
             ))
             
             fig.update_layout(
-                title='Price Positioning Relative to WTP',
+                title='Price Positioning',
                 xaxis_title='Price (₹)',
-                height=350,
-                showlegend=True,
-                yaxis=dict(categoryorder='array', categoryarray=['WTP Range', 'Base Price', 'Recommended Price'])
+                height=300,
+                showlegend=True
             )
             st.plotly_chart(fig, use_container_width=True)
         
@@ -1457,7 +1402,7 @@ def dynamic_pricing_tab(df):
             # Price sensitivity
             st.markdown("**Price Sensitivity Analysis**")
             
-            price_points = np.linspace(base_price * 0.9, predicted_max_price * 1.1, 20)
+            price_points = np.linspace(base_price * 0.8, predicted_max_price * 1.2, 20)
             conversion_probs = [max(0, min(100, (1 - (p / predicted_max_price)) * 100)) 
                               for p in price_points]
             
@@ -1465,13 +1410,12 @@ def dynamic_pricing_tab(df):
             fig.add_trace(go.Scatter(x=price_points, y=conversion_probs, mode='lines',
                                    line=dict(color='blue', width=2)))
             fig.add_vline(x=final_price, line_dash="dash", line_color="green",
-                         annotation_text=f"Recommended: ₹{final_price:,.0f}",
-                         annotation_position="top right")
+                         annotation_text=f"Recommended: ₹{final_price:,.0f}")
             fig.update_layout(
                 title='Estimated Conversion Probability vs Price',
                 xaxis_title='Price (₹)',
                 yaxis_title='Conversion Probability (%)',
-                height=350
+                height=300
             )
             st.plotly_chart(fig, use_container_width=True)
         
@@ -1480,39 +1424,38 @@ def dynamic_pricing_tab(df):
         
         recommendations = []
         
-        margin = (final_price - base_price) / final_price * 100
-        if margin < 15:
-            recommendations.append(f"**Low Margin:** Current margin ({margin:.1f}%) is conservative. Consider increasing the markup, especially if demand is high.")
-        elif margin > 40:
-            recommendations.append(f"**High Margin:** Excellent profit margin ({margin:.1f}%). Ensure product quality and marketing justify this premium.")
+        if final_price < base_price * 1.1:
+            recommendations.append("⚠️ **Low margin** - Consider increasing base price or markup")
         
-        if demand_factor > 1.2:
-            recommendations.append("**High Demand Factor:** Price premium is justified by high demand. Monitor inventory closely.")
+        if predicted_max_price > final_price * 1.5:
+            recommendations.append("✅ **Good margin opportunity** - Customer has high willingness to pay")
         
-        if loyalty_discount > 0:
-            recommendations.append(f"**Loyalty Focus:** Offering a {loyalty_discount}% discount supports customer retention. Highlight this value.")
+        if demand_factor > 1.3:
+            recommendations.append("📈 **High demand** - Price premium is justified")
         
-        if predicted_max_price > final_price * 1.3:
-            recommendations.append("**Untapped Potential:** Predicted Max WTP is significantly higher. You could test a higher price point to maximize revenue.")
+        if sustainability in ['High', 'Very High'] and artisan_support in ['High', 'Very High']:
+            recommendations.append("🌿 **Value-conscious customer** - Emphasize sustainability & artisan story")
         
-        if shopping_style == 'Luxury' and predicted_max_price < 10000:
-             recommendations.append("**Profile Mismatch:** The 'Luxury' profile suggests higher price tolerance. The WTP prediction might be low for the current product category.")
-
+        if shopping_style == 'Luxury':
+            recommendations.append("💎 **Luxury customer** - Premium pricing and exclusive experience recommended")
+        
+        if income in ['>150K', '100-150K'] and predicted_max_price > 15000:
+            recommendations.append("💰 **High-value customer** - Consider VIP treatment and personalized service")
+        
         for rec in recommendations:
-            st.markdown(f"* {rec}")
+            st.markdown(rec)
         
         # Strategy summary
         st.subheader("📋 Pricing Strategy Summary")
         
         strategy_data = {
-            'Component': ['Base Price', 'Avg Markup %', 'Demand Factor', 'Loyalty Discount %', 
-                         'Initial Calculated Price', 'Final Recommended Price', 'Max WTP', 'Safety Margin'],
+            'Component': ['Base Price', 'Markup', 'Demand Adjustment', 'Loyalty Discount', 
+                         'Final Price', 'Max WTP', 'Safety Margin'],
             'Value': [
                 f"₹{base_price:,.0f}",
-                f"{np.mean(markup_range)*100:.1f}%",
+                f"+{np.mean(markup_range)*100:.0f}%",
                 f"×{demand_factor:.1f}",
                 f"-{loyalty_discount:.0f}%",
-                f"₹{optimal_price:,.0f}",
                 f"₹{final_price:,.0f}",
                 f"₹{predicted_max_price:,.0f}",
                 f"₹{(predicted_max_price - final_price):,.0f} ({((predicted_max_price - final_price) / predicted_max_price * 100):.1f}%)"
@@ -1526,17 +1469,21 @@ def dynamic_pricing_tab(df):
         
         report_data = {
             'Customer Profile': {
-                'Age Group': age_group, 'Gender': gender, 'Location': location,
-                'Income': income, 'Monthly Spending': monthly_spending,
-                'Shopping Style': shopping_style, 'Sustainability': sustainability,
+                'Age Group': age_group,
+                'Gender': gender,
+                'Location': location,
+                'Income': income,
+                'Monthly Spending': monthly_spending,
+                'Shopping Style': shopping_style,
+                'Sustainability': sustainability,
                 'Artisan Support': artisan_support
             },
             'Pricing Details': {
-                'Base Price (₹)': base_price,
-                'Recommended Price (₹)': round(final_price, 2),
-                'Max WTP (₹)': predicted_max_price,
-                'Profit Margin %': round(margin, 2),
-                'Conversion Probability %': round(conversion_prob * 100, 2)
+                'Base Price': base_price,
+                'Recommended Price': round(final_price, 2),
+                'Max WTP': predicted_max_price,
+                'Profit Margin %': round((final_price - base_price) / final_price * 100, 2),
+                'Conversion Probability %': round((1 - (final_price / predicted_max_price)) * 100, 2)
             }
         }
         
@@ -1549,7 +1496,6 @@ def dynamic_pricing_tab(df):
         csv = convert_df_to_csv(report_df)
         st.download_button("📥 Download Pricing Report", csv,
                          "pricing_report.csv", "text/csv")
-
 
 # =============================================================================
 # MAIN APP
@@ -1573,56 +1519,58 @@ def main():
             ["Use Sample Data", "Upload CSV", "Load from GitHub"]
         )
         
-        # Button flags to trigger data loading/generation
-        data_loaded = False
+        df = None
         
         if data_source == "Use Sample Data":
             n_samples = st.slider("Number of samples", 100, 2000, 1000, 100)
-            if st.button("Generate Sample Data", key="gen_data"):
+            if st.button("Generate Sample Data"):
                 # Clear cache and generate new data to ensure clean state
                 generate_synthetic_data.clear()
                 df = generate_synthetic_data(n_samples)
                 st.session_state['df'] = df
                 st.success(f"✅ Generated {len(df)} samples. Please proceed to the main tabs.")
-                data_loaded = True
                 st.rerun() # Force a clean rerun after data generation
         
         elif data_source == "Upload CSV":
             uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
             if uploaded_file is not None:
-                df = pd.read_csv(uploaded_file)
-                st.session_state['df'] = df
-                st.success(f"✅ Loaded {len(df)} rows. Please verify all required columns are present.")
-                data_loaded = True
-                st.rerun() # Force a clean rerun after data loading
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    st.session_state['df'] = df
+                    st.success(f"✅ Loaded {len(df)} rows. Please verify all required columns are present.")
+                    st.rerun() # Force a clean rerun after data loading
+                except Exception as e:
+                    st.error(f"Error reading CSV file: {e}")
+                    st.session_state['df'] = None
         
         else:  # GitHub
             github_url = st.text_input(
                 "GitHub Raw URL",
                 placeholder="https://raw.githubusercontent.com/..."
             )
-            if st.button("Load from GitHub", key="load_github"):
+            if st.button("Load from GitHub"):
                 df = load_data_from_github(github_url)
                 if df is not None:
                     st.session_state['df'] = df
-                    st.success(f"✅ Loaded {len(df)} rows from GitHub.")
-                    data_loaded = True
+                    st.success(f"✅ Loaded {len(df)} rows from GitHub")
                     st.rerun() # Force a clean rerun after data loading
         
-        # Data summary
-        df_current = st.session_state['df']
-        if df_current is not None:
+        # Use existing data if available
+        if 'df' in st.session_state:
+            df = st.session_state['df']
+        
+        if df is not None:
             st.markdown("---")
             st.subheader("📈 Data Summary")
-            st.write(f"**Rows:** {len(df_current)}")
-            st.write(f"**Columns:** {len(df_current.columns)}")
+            st.write(f"**Rows:** {len(df)}")
+            st.write(f"**Columns:** {len(df.columns)}")
             
             with st.expander("View Data"):
-                st.dataframe(df_current.head(10))
+                st.dataframe(df.head(10))
             
             with st.expander("View Columns"):
-                st.dataframe(df_current.dtypes.rename('DataType'))
-
+                st.dataframe(df.dtypes.rename('DataType'))
+        
         st.markdown("---")
         st.markdown("### 📖 About")
         st.info(
@@ -1634,12 +1582,10 @@ def main():
     st.title("🛍️ Shopizz.com Analytics Dashboard")
     st.markdown("Comprehensive ML-powered customer analytics platform")
     
-    df = st.session_state['df']
-    
-    if df is None:
-        st.warning("⚠️ Please load data from the sidebar to begin analysis (using **'Generate Sample Data'** is the safest option).")
+    if 'df' not in st.session_state or st.session_state['df'] is None:
+        st.warning("⚠️ Please load data from the sidebar to begin analysis (using **'Generate Sample Data'** is recommended).")
         
-        # Show welcome screen features
+        # Show welcome screen
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -1675,6 +1621,8 @@ def main():
             """)
         
         return
+    
+    df = st.session_state['df']
     
     # Create tabs
     tabs = st.tabs([
